@@ -20,10 +20,9 @@ from utils.utils import AverageMeter, save_checkpoint, load_checkpoint
 from model.ale import ALE
 from test import compute_dist
 from zsl_eval.evaluate import evaluate
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-vis = visdom.Visdom(env='ZSL-ms-without relu')
-vis.check_connection()
+
 
 def create_vis_plot(_xlabel, _ylabel, _title, _legend):
     opts = dict(
@@ -62,13 +61,18 @@ class HiddenPrints:
         sys.stdout = self._original_stdout
 
 def get_delta(yn, class_num=50):
-    delta = torch.ones(class_num)
-    delta[yn]=0
+    delta = torch.zeros(class_num)
+    delta[yn]=1
     return delta
 
 def rank(yn,comp):
     comp_l = comp  + get_delta(yn)
-    return torch.sum(comp_l>comp[yn])
+    #print("comp_l: ",comp_l.grad_fn)
+    mygte = comp_l[comp_l>=comp[yn]] 
+    mygte = mygte / mygte
+    #mygte = comp_l>=comp[yn]
+    #print("mygte: ",mygte.grad_fn)
+    return torch.sum(mygte).int()
     
 def get_l(r):
     return torch.sum( torch.tensor( [1/i for i in range(1,r+1)] ) )    
@@ -79,13 +83,23 @@ def ale_loss(yns,comps):
         comp = comps[i]
         yn = yns[i]
         r = rank(yn,comp)
+        #print("RR: ",r)
         lr = get_l(r)
+        #print("LR: ",lr)
+        #print(r.grad_fn)
         lr_over_r = lr / r
-        
+        #print("Over: ",lr_over_r)
+        #print(lr_over_r.shape)
+        #print(comp.shape)
         comp_2 = comp+get_delta(yn)-comp[yn]
+        #print(comp_2.shape)
         comp_3 = comp_2[comp_2>0]
+        #print(comp_3.shape)
         comp_4 = lr_over_r*comp_3
+        #print(comp_4.shape)
         summ = summ + torch.sum(comp_4)
+        #print(summ.shape)
+
 
     return summ
 
@@ -149,7 +163,7 @@ def test(test_loader,args, model_dir=None, model=None):
     
     return acc1.avg, acc5.avg, loss.avg
 
-def eval_func( inp,embedding_matrix,model_path):
+def eval_func( inp,embedding_matrix,model_dir):
     """
     input set X, [n_samples, d_features]
     ground-truth output embeddings (or attributes) per class, S, [n_classes, d_attributes]
@@ -157,7 +171,9 @@ def eval_func( inp,embedding_matrix,model_path):
     retval:
         [n_samples, n_classes] (i guess so?)
     """
-    embedding_matrix = torch.from_numpy(embedding_matrix).cuda()
+    model_path = osp.join(model_dir, 'checkpoint.pth.tar')
+    #embedding_matrix = torch.from_numpy(embedding_matrix).cuda()
+    embedding_matrix = embedding_matrix.cuda()
     model = ALE(embedding_matrix,img_embed_size = inp.shape[1] , word_embed_size= embedding_matrix.shape[1] , gpu=True, dropout=0)
     model = model.cuda()
     with HiddenPrints():
@@ -174,7 +190,10 @@ def eval_func( inp,embedding_matrix,model_path):
     
 
 def main(args):
-    
+    vis = visdom.Visdom(env=args.model_dir)
+    vis.check_connection()
+    args.model_dir = osp.join("./log",args.model_dir)
+    print(args.model_dir)
     if args.test:
         evaluate(eval_func,args.dset_path, args.model_path)
         exit()
@@ -261,8 +280,13 @@ def main(args):
             print('Epoch: [{}][{}/{}]\t Loss  {:.6f}\t Acc1 {:.3f}\t Acc5 {:.3f}\t'
                   .format(epoch, i + 1, len(train_loader),
                          loss.avg, acc1.avg, acc5.avg))
+        save_checkpoint({
+            'state_dict': model.state_dict(),
+            'epoch': epoch + 1
+        }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
+        
         acc1_val,acc5_val,loss_val = test(test_loader,args, args.model_dir,model=model)
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_path)
+        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, embedding_matrix)
         print("------")
         
         ##### PLOTS
@@ -334,11 +358,8 @@ def main(args):
                  opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen'])
                  )
         ##########
-        save_checkpoint({
-            'state_dict': model.state_dict(),
-            'epoch': epoch + 1,
-            'zsl_acc': zsl_acc,
-        }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
+
+        
         if zsl_acc > best_zsl_acc:
             best_zsl_acc = zsl_acc
             save_checkpoint({
@@ -362,7 +383,6 @@ if __name__ == '__main__':
     
     parser.add_argument('--features', type=str, default=None)
     parser.add_argument('--dset-path', type=str, default=None)
-    parser.add_argument('--model-path', type=str, default=None)
 
     parser.add_argument('--dropout', type=float, default=0)
     # optimizer
@@ -378,7 +398,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--start_save', type=int, default=0,
                         help="start saving checkpoints after specific epoch")
-    parser.add_argument('--seed', type=int, default=7)
+
     parser.add_argument('--print-freq', type=int, default=1)
 
     # misc

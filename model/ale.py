@@ -8,13 +8,16 @@ import numpy as np
 
 
 class ALE(nn.Module):
-    def __init__(self, embedding_matrix, img_embed_size=100,word_embed_size=100,gpu=False,dropout=0):
+    def __init__(self, embedding_matrix, img_embed_size=100,word_embed_size=None,gpu=False,dropout=0):
         super(ALE, self).__init__()
         self.gpu = gpu
         self.embedding_matrix = embedding_matrix
         self.bilin = nn.Bilinear(img_embed_size,word_embed_size,1,bias=False)
         self.img_embed_size = img_embed_size
-        self.word_embed_size = word_embed_size
+        if word_embed_size == None:
+            self.word_embed_size = embedding_matrix.shape[1]
+        else:
+            self.word_embed_size = word_embed_size
         self.num_class = embedding_matrix.shape[0]
         self.softm = nn.Softmax(dim=1)
         self.dropout = None
@@ -31,7 +34,7 @@ class ALE(nn.Module):
             retval[:,i] = self.bilin(x , self.embedding_matrix[i].expand(batch_size,self.word_embed_size)
                             .contiguous() ).squeeze()
 
-        retval = self.softm(retval)
+        #retval = self.softm(retval)
         return retval
     """
     def forward(self, x):

@@ -20,6 +20,7 @@ from utils.utils import AverageMeter, save_checkpoint, load_checkpoint
 from model.ale import ALE
 from test import compute_dist
 from zsl_eval.evaluate import evaluate
+from visdomsave import vis
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
@@ -66,7 +67,7 @@ def get_delta(yn, class_num=50):
     return delta
 
 def rank(yn,comp):
-    comp_l = comp  + get_delta(yn)
+    comp_l = comp  + get_delta(yn,class_num=comp.shape[0])
     #print("comp_l: ",comp_l.grad_fn)
     mygte = comp_l[comp_l>=comp[yn]] 
     mygte = mygte / mygte
@@ -91,9 +92,9 @@ def ale_loss(yns,comps):
         #print("Over: ",lr_over_r)
         #print(lr_over_r.shape)
         #print(comp.shape)
-        comp_2 = comp+get_delta(yn)-comp[yn]
+        comp_2 = comp+get_delta(yn,class_num = comp.shape[0])-comp[yn]
         #print(comp_2.shape)
-        comp_3 = comp_2[comp_2>0]
+        comp_3 = comp_2[comp_2>=0]
         #print(comp_3.shape)
         comp_4 = lr_over_r*comp_3
         #print(comp_4.shape)
@@ -163,7 +164,7 @@ def test(test_loader,args, model_dir=None, model=None):
     
     return acc1.avg, acc5.avg, loss.avg
 
-def eval_func( inp,embedding_matrix,model_dir):
+def eval_func( inp,embedding_matrix,model_dir, model = None):
     """
     input set X, [n_samples, d_features]
     ground-truth output embeddings (or attributes) per class, S, [n_classes, d_attributes]
@@ -171,6 +172,7 @@ def eval_func( inp,embedding_matrix,model_dir):
     retval:
         [n_samples, n_classes] (i guess so?)
     """
+
     model_path = osp.join(model_dir, 'checkpoint.pth.tar')
     #embedding_matrix = torch.from_numpy(embedding_matrix).cuda()
     embedding_matrix = embedding_matrix.cuda()
@@ -182,7 +184,7 @@ def eval_func( inp,embedding_matrix,model_dir):
     model.eval()
     inp = torch.from_numpy(inp).cuda()
     retval = model(inp)
-    
+
     retval = retval.cpu().detach().numpy()
     
     return retval
@@ -208,7 +210,7 @@ def main(args):
     # torch.manual_seed(args.seed)
     # cudnn.benchmark = True
     train_loader, test_loader = get_data(args)
-    embedding_matrix = train_loader.dataset.get_embedding_matrix().float()
+    embedding_matrix = train_loader.dataset.get_embedding_matrix()
     if args.gpu:
         embedding_matrix = embedding_matrix.cuda()
         
@@ -234,7 +236,7 @@ def main(args):
                                 amsgrad=True)
 
     def adjust_lr(epoch):
-        if epoch in [80]:
+        if epoch in [40,80,120,160]:
             lr = 0.1 * args.lr
             print('=====> adjust lr to {}'.format(lr))
             for g in optimizer.param_groups:
@@ -286,7 +288,7 @@ def main(args):
         }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
         
         acc1_val,acc5_val,loss_val = test(test_loader,args, args.model_dir,model=model)
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, embedding_matrix)
+        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
         print("------")
         
         ##### PLOTS
@@ -416,5 +418,12 @@ if __name__ == '__main__':
                         help="test the results on bulent's script")
     
     
-    main(parser.parse_args())
+    try:
+        args = parser.parse_args()
+        main(args)
+        vis.create_log(args.model_dir)
+    except KeyboardInterrupt:
+        print("Saving and Exiting...")
+        vis.create_log(args.model_dir)
+        exit()
 

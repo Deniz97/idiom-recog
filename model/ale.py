@@ -12,15 +12,17 @@ class ALE(nn.Module):
         super(ALE, self).__init__()
         self.gpu = gpu
         self.embedding_matrix = embedding_matrix
-        self.bilin = nn.Bilinear(img_embed_size,word_embed_size,1,bias=False)
+        
         self.img_embed_size = img_embed_size
         if word_embed_size == None:
             self.word_embed_size = embedding_matrix.shape[1]
         else:
             self.word_embed_size = word_embed_size
+        
         self.num_class = embedding_matrix.shape[0]
         self.softm = nn.Softmax(dim=1)
         self.dropout = None
+        self.bilin = nn.Bilinear(img_embed_size,word_embed_size,1,bias=False)
         if dropout>0:
             self.dropout = nn.Dropout(p=dropout)
                     

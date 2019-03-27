@@ -6,6 +6,7 @@ from scipy.io import loadmat
 import random
 import torch
 import pickle as pc
+import numpy as np
 
 
 class myDataSet(data.Dataset):
@@ -22,7 +23,15 @@ class myDataSet(data.Dataset):
         with open(osp.join(data_path,"allclasses.txt"),"r") as filem:
                   lines = filem.readlines()
                   lines = [ x.rstrip() for x in lines]
-                  self.class_list = lines
+                  self.class_list = sorted(lines)
+        with open(osp.join(data_path,"trainclasses2.txt"),"r") as filem:
+                  lines = filem.readlines()
+                  lines = [ x.rstrip() for x in lines]
+                  self.train_class_list = sorted(lines)
+        with open(osp.join(data_path,"valclasses2.txt"),"r") as filem:
+                  lines = filem.readlines()
+                  lines = [ x.rstrip() for x in lines]
+                  self.val_class_list = sorted(lines)
         self.feature_list = b["features"].T
         #the actul string classname
         self.label_list = [ self.class_list[x[0]-1] for x in b["labels"]]
@@ -36,8 +45,8 @@ class myDataSet(data.Dataset):
                 self.class_att_table = pc.load(filem)
 
         self.train, self.valid, self.test_seen, self.test_unseen = [], [], [], []
-        self.train = [ x[0]-1 for x in a["train_loc"] ]
-        self.valid = [ x[0]-1 for x in a["val_loc"] ]
+        self.train = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.train_class_list ] if self.is_train else []
+        self.valid = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.val_class_list ] if not self.is_train else []
         print("Done dataset init")
     
     def get_class_table(self,data_path):
@@ -48,7 +57,24 @@ class myDataSet(data.Dataset):
         pass
     
     def get_embedding_matrix(self):
-        return torch.from_numpy(self.class_att_table)
+        if self.is_train:
+            retval = np.zeros(( len(self.train_class_list) , self.get_word_embed_size() ))
+            j=0
+            for i,em in enumerate(self.class_list):
+                if em in self.train_class_list:
+                    retval[j] = self.class_att_table[i]
+                    j+=1
+        else:
+            retval = np.zeros(( len(self.val_class_list) , self.get_word_embed_size() ))
+            j=0
+            for i,em in enumerate(self.class_list):
+                if em in self.val_class_list:
+                    retval[j] = self.class_att_table[i]
+                    j+=1
+        return torch.from_numpy(retval).float()
+    def get_embedding_matrix_all(self):
+        return torch.from_numpy(self.class_att_table).float()
+        
     def get_image_embed_size(self):
         return self.feature_list.shape[1]
     def get_word_embed_size(self):
@@ -75,7 +101,8 @@ class myDataSet(data.Dataset):
        
         
         # Save meta data
-        meta = {'index': orgIndex, 'path' : img_path, "label" : self.label_list[index], "class" : self.class_indices[index]}
+        meta = {'index': orgIndex, 'path' : img_path, "label" : self.label_list[index], "class" : self.train_class_list.index(self.label_list[index]) if self.is_train 
+               else self.val_class_list.index(self.label_list[index]) }
 
         
         return img_embedding, class_embedding, meta

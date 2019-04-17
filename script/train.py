@@ -107,6 +107,7 @@ def main(args):
     model = nn.DataParallel(model).cuda()
     
     # Optimizer
+    """
     if hasattr(model.module, 'base'):
         base_param_ids = set(map(id, model.module.base.parameters()))
         new_params = [p for p in model.parameters() if
@@ -116,11 +117,10 @@ def main(args):
             {'params': new_params, 'lr_mult': 1.0}]
     else:
         param_groups = model.parameters()
-    
-    optimizer = torch.optim.SGD(param_groups, lr=args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay,
-                                nesterov=True)
+    """
+    param_groups = model.parameters()
+    optimizer = torch.optim.ADAM(param_groups, lr=args.lr,
+                                weight_decay=args.weight_decay)
 
     def adjust_lr(epoch):
         if epoch in [80]:

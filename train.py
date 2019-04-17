@@ -21,7 +21,7 @@ from model.ale import ALE
 from test import compute_dist
 from zsl_eval.evaluate import evaluate
 from visdomsave import vis
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 
 
@@ -62,8 +62,8 @@ class HiddenPrints:
         sys.stdout = self._original_stdout
 
 def get_delta(yn, class_num=50):
-    delta = torch.zeros(class_num)
-    delta[yn]=1
+    delta = torch.ones(class_num)
+    delta[yn]=0
     return delta
 
 def rank(yn,comp):
@@ -78,7 +78,7 @@ def rank(yn,comp):
 def get_l(r):
     return torch.sum( torch.tensor( [1/i for i in range(1,r+1)] ) )    
     
-def ale_loss(yns,comps):
+def ale_loss(comps,yns):
     summ = torch.tensor(0)
     for i in range(comps.shape[0]):
         comp = comps[i]
@@ -104,6 +104,9 @@ def ale_loss(yns,comps):
 
     return summ
 
+
+
+
 def get_data(args):
 
     # Data loading code
@@ -113,7 +116,7 @@ def get_data(args):
             num_workers=4, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
-            myDataSet(is_train = False, features=args.features),
+            myDataSet(is_train = False, features=args.features, a = train_loader.dataset.a, b = train_loader.dataset.b ),
             batch_size=args.batch_size, shuffle=False,
             num_workers=4, pin_memory=True)
     
@@ -121,36 +124,50 @@ def get_data(args):
 
 
 def top1_acc(gts,comps):
+    #print("-----------")
+    #print(gts.shape)
+    #print(gts)
+    #print(comps.shape)
+    #print(comps)
     preds = comps.max(1)[1]
-    return torch.sum(gts==preds).item() / comps.size(0)
+    #print(preds.shape)
+    #print(preds)
+    acc= torch.sum(gts==preds).item() / comps.size(0)
+    #print(acc)
+    #print("-----------")
+    
+    return acc
 
 def top5_acc(gts,comps):
-    preds = torch.topk(comps,5)[1]
+    preds = torch.topk(comps,5 if 5<=comps.shape[1] else comps.shape[1])[1]
     retval = sum([ 1 for (i,x) in enumerate(gts) if x.item() in preds[i] ])
     return retval / comps.size(0)
 
-def test(test_loader,args, model_dir=None, model=None):
+def test(val_loader,args, model=None, criterion = None):
     
     #checkpoint = load_checkpoint(osp.join(model_dir, 'checkpoint.pth.tar'))
     #model.module.load_state_dict(checkpoint['state_dict'])
-    
+    a=val_loader.dataset.get_embedding_matrix()
+    model.set_embedding(a)
     if args.gpu:
         model = model.cuda()
     model.eval()
     loss = AverageMeter()
     acc1 = AverageMeter()
     acc5 = AverageMeter()
+
     with torch.no_grad():
-        for i, d in enumerate(test_loader):
+        for i, d in enumerate(val_loader):
             img_embeds, class_embeds, metas = d
             if args.gpu:
                 img_embeds = img_embeds.cuda()
             comps = model(img_embeds)
+            #print("COOOMPS: ",comps.shape)
             if args.gpu:
                 comps = comps.cpu()
-            mse_loss = ale_loss(metas["class"],comps)
-            mse_loss = mse_loss/args.batch_size
-            loss.update(mse_loss.item(), img_embeds.size(0))
+            loss_value = criterion(comps,metas["class"])
+            loss_value = loss_value/ img_embeds.size(0)
+            loss.update(loss_value.item(), img_embeds.size(0))
 
             acctop1 = top1_acc(metas["class"],comps)
             acctop5 = top5_acc(metas["class"],comps)
@@ -174,9 +191,9 @@ def eval_func( inp,embedding_matrix,model_dir, model = None):
     """
 
     model_path = osp.join(model_dir, 'checkpoint.pth.tar')
-    #embedding_matrix = torch.from_numpy(embedding_matrix).cuda()
-    embedding_matrix = embedding_matrix.cuda()
-    model = ALE(embedding_matrix,img_embed_size = inp.shape[1] , word_embed_size= embedding_matrix.shape[1] , gpu=True, dropout=0)
+
+    embedding_matrix = torch.from_numpy(embedding_matrix).float().cuda()
+    model = ALE(embedding_matrix,img_embed_size = inp.shape[1] , gpu=True, dropout=0)
     model = model.cuda()
     with HiddenPrints():
         checkpoint = load_checkpoint(model_path)
@@ -196,9 +213,7 @@ def main(args):
     vis.check_connection()
     args.model_dir = osp.join("./log",args.model_dir)
     print(args.model_dir)
-    if args.test:
-        evaluate(eval_func,args.dset_path, args.model_path)
-        exit()
+    
     """
     vis_title = 'Blablablab'
     vis_legend = ['one Loss', 'two Loss', 'Total Loss']
@@ -209,12 +224,18 @@ def main(args):
     # np.random.seed(args.seed)
     # torch.manual_seed(args.seed)
     # cudnn.benchmark = True
-    train_loader, test_loader = get_data(args)
+    train_loader, val_loader = get_data(args)
     embedding_matrix = train_loader.dataset.get_embedding_matrix()
     if args.gpu:
         embedding_matrix = embedding_matrix.cuda()
-        
-    model = ALE(embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size() , word_embed_size=train_loader.dataset.get_word_embed_size() , gpu=args.gpu, dropout=args.dropout)
+    
+    if args.test:
+        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=None)
+        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
+        print("Harmonic: %d" % zsl_harmonic)
+        exit()
+    
+    model = ALE(embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size(), gpu=args.gpu, dropout=args.dropout)
     
     print(model)
     
@@ -225,6 +246,13 @@ def main(args):
         print("device: ",next(model.parameters()).device)
     param_groups = model.parameters()
     
+    if args.cost == "ALE":
+        criterion = ale_loss
+    elif args.cost == "CEL":
+        print("Using cross-entrophy loss")
+        criterion =torch.nn.CrossEntropyLoss()
+    else:
+        assert False, "Unknown cost function"
     """
     optimizer = torch.optim.SGD(param_groups, lr=args.lr,
                                 momentum=args.momentum,
@@ -236,43 +264,47 @@ def main(args):
                                 amsgrad=True)
 
     def adjust_lr(epoch):
-        if epoch in [40,80,120,160]:
-            lr = 0.1 * args.lr
-            print('=====> adjust lr to {}'.format(lr))
+        if epoch in [5,10]:
+
             for g in optimizer.param_groups:
-                g['lr'] = lr * g.get('lr_mult', 1)
+                g['lr'] *= 0.1
+                print('=====> adjust lr to {}'.format(g['lr']))
+    
     best_zsl_acc = 0
+    
     for epoch in range(0, args.epochs):
         adjust_lr(epoch)
         model.train()
+        model.set_embedding(train_loader.dataset.get_embedding_matrix())
 
         loss = AverageMeter()
         acc1 = AverageMeter()
         acc5 = AverageMeter()
-        iteration  = 935 * epoch
         
         for i,d in enumerate(train_loader):
-            iteration += 1
     
             img_embeds, class_embeds, metas = d
             if args.gpu:
                 img_embeds = img_embeds.cuda()
-        
-            img_embeds.requires_grad_()
-            
 
             optimizer.zero_grad()
             comps = model(img_embeds)
             if args.gpu:
                 comps = comps.cpu()
-            mse_loss = ale_loss(metas["class"],comps)
-            mse_loss = mse_loss/args.batch_size
-            loss.update(mse_loss.item(), img_embeds.size(0))
-            
-            mse_loss.backward()
+            loss_value = criterion(comps, metas["class"])
+            loss_value = loss_value/img_embeds.size(0)
+            loss.update(loss_value.item(), img_embeds.size(0))
+                        
+            loss_value.backward()
+            if i%10==0 and False:
+                print(model.bilin.weight)
+                print()
+                print(model.bilin.weight.grad)
+                print("---")
             optimizer.step()
-            
-            acc1_train = top1_acc(metas["class"],comps)
+
+            with HiddenPrints():
+                acc1_train = top1_acc(metas["class"],comps)
             acc5_train = top5_acc(metas["class"],comps)
             acc1.update(acc1_train,img_embeds.size(0))
             acc5.update(acc5_train,img_embeds.size(0))
@@ -287,8 +319,13 @@ def main(args):
             'epoch': epoch + 1
         }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
         
-        acc1_val,acc5_val,loss_val = test(test_loader,args, args.model_dir,model=model)
+        model.set_embedding(val_loader.dataset.get_embedding_matrix())
+        
+        acc1_val,acc5_val,loss_val = test(val_loader,args,model=model, criterion=criterion)
         zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
+        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
+        
+        print("Harmonic: %.3f" % zsl_harmonic)
         print("------")
         
         ##### PLOTS
@@ -343,21 +380,28 @@ def main(args):
                  win='test',
                  update='append' if epoch > 0 else None,
                  name="zsl_acc",
-                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen'])
+                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen','harmonic'])
                  )
         vis.line(X=torch.ones((1,)) * epoch,
                  Y=torch.Tensor((zsl_acc_seen,)),
                  win='test',
                  update='append' if epoch > 0 else None,
                  name="seen",
-                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen'])
+                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen','harmonic'])
                  )
         vis.line(X=torch.ones((1,)) * epoch,
                  Y=torch.Tensor((zsl_acc_unseen,)),
                  win='test',
                  update='append' if epoch > 0 else None,
                  name="unseen",
-                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen'])
+                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen','harmonic'])
+                 )
+        vis.line(X=torch.ones((1,)) * epoch,
+                 Y=torch.Tensor((zsl_harmonic,)),
+                 win='test',
+                 update='append' if epoch > 0 else None,
+                 name="harmonic",
+                 opts=dict(xlabel='Epoch', title='testing', legend=['zsl_acc','seen','unseen', 'harmonic' ])
                  )
         ##########
 
@@ -377,8 +421,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ZSL")
 
     # dat
-    parser.add_argument('-b', '--batch-size', type=int, default=32)
-    parser.add_argument('-j', '--workers', type=int, default=4)
+    parser.add_argument('-b', '--batch-size', type=int, default=64)
 
 
     # model
@@ -391,15 +434,14 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.01,
                         help="learning rate of new parameters, for pretrained "
                              "parameters it is 10 times smaller than this")
-    parser.add_argument('--momentum', type=float, default=0.9)
+
     parser.add_argument('--weight-decay', type=float, default=1e-4)
 
     # training configs
     parser.add_argument('--resume', type=str, default='', metavar='PATH')
 
     parser.add_argument('--epochs', type=int, default=20)
-    parser.add_argument('--start_save', type=int, default=0,
-                        help="start saving checkpoints after specific epoch")
+
 
     parser.add_argument('--print-freq', type=int, default=1)
 
@@ -408,14 +450,18 @@ if __name__ == '__main__':
 
     parser.add_argument('--model-dir', type=str, metavar='PATH', default='./model')
 
-    parser.add_argument('--logs-dir', type=str, metavar='PATH',
-                        default=osp.join(working_dir, 'logs'))
     
     parser.add_argument('--gpu',  dest='gpu', action='store_true',
                         help='Enable gpu and cuda')
     
     parser.add_argument('--test',  dest='test', action='store_true',
                         help="test the results on bulent's script")
+    
+    parser.add_argument('--cost', type=str, metavar='PATH', default='ALE')
+    
+    
+    
+
     
     
     try:

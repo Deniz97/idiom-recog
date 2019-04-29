@@ -40,38 +40,7 @@ class ALE(nn.Module):
         #retval = self.softm(retval)
         return retval
 
-    """
-    def forward(self, x):
-        if self.dropout:
-            x = self.dropout(x)
-        batch_size = x.shape[0]
-        retval = torch.zeros(batch_size,self.num_class)
-        
-        for i in range(self.num_class):
-            retval[:,i] = self.bilin(x , self.embedding_matrix[i].expand(batch_size,self.word_embed_size)
-                            .contiguous() ).squeeze()
 
-        #retval = self.softm(retval)
-        return retval
-    """
-    """
-    def forward(self, x):
-        if self.dropout:
-            x = self.dropout(x)
-        batch_size = x.shape[0]
-        x_expand = torch.zeros(batch_size,self.num_class,self.img_embed_size)
-        if self.gpu:
-            x_expand = x_expand.cuda()
-        for i in range(self.num_class):
-            x_expand[:,i,:] = x
-        #x_expand.contiguous()
-        retval = self.bilin(x_expand, self.embedding_matrix
-                            .expand(batch_size,self.num_class,self.word_embed_size)
-                            .contiguous() )
-        retval = retval.squeeze()
-        retval = self.softm(retval)
-        return retval
-    """
     
     
     

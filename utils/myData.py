@@ -10,12 +10,12 @@ import numpy as np
 
 
 class myDataSet(data.Dataset):
-    def __init__(self, dset_name="awa2", is_train = True, split = 1 , features=None,a = None, b = None):
+    def __init__(self, db="AWA2", is_train = True, split = 1 , att=None,a = None, b = None):
         self.is_train = is_train  # training set or test set
         self.split = split
-        self.features = features
+        self.att = att
         ps_path = "/slow_data/denizulug/GBU/xlsa17/data"
-        if dset_name=="awa2":
+        if db=="AWA2":
             data_path = osp.join(ps_path,"AWA2")
         else:
             assert False, "This dset not yet supported"
@@ -26,27 +26,32 @@ class myDataSet(data.Dataset):
         self.b = b
         with open(osp.join(data_path,"allclasses.txt"),"r") as filem:
                   lines = filem.readlines()
-                  lines = [ x.rstrip() for x in lines]
+                  lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.class_list = lines
         with open(osp.join(data_path,"trainclasses"+str(split)+".txt"),"r") as filem:
                   lines = filem.readlines()
-                  lines = [ x.rstrip() for x in lines]
+                  lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.train_class_list = sorted(lines)
         with open(osp.join(data_path,"valclasses"+str(split)+".txt"),"r") as filem:
                   lines = filem.readlines()
-                  lines = [ x.rstrip() for x in lines]
+                  lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.val_class_list = sorted(lines)
+
         self.feature_list = b["features"].T
         #the actul string classname
         self.label_list = [ self.class_list[x[0]-1] for x in b["labels"]]
         #indexed class index
         self.class_indices = [ x[0]-1 for x in b["labels"] ]
         self.image_paths = [ x[0][0].replace("/BS/xian/work/data/","/slow_data/denizulug/").replace("//","/") for x in b["image_files"]]
-        if self.features == None:
-            self.class_att_table = a["att"].T
+        if self.att == "label":
+            self.class_att_table = torch.from_numpy(a["att"].T).float()
         else:
-            with open(self.features,"rb") as filem:
-                self.class_att_table = pc.load(filem)
+            with open("/slow_data/denizulug/GBU/xlsa17/data/"+db+"/embeddings_"+self.att+".pc","rb")as filem:
+                dic = pc.load(filem)
+                l = len(dic[list(dic.keys())[0]])
+                self.class_att_table = torch.zeros((len(self.class_list),l)).float()
+                for i,label in enumerate(dic):
+                    self.class_att_table[self.class_list.index(label)] = torch.tensor(dic[label]).float()
 
         self.train, self.valid  = [], []
         #self.train = [ x[0]-1 for x in a["train_loc"] ] if self.is_train else []
@@ -60,8 +65,7 @@ class myDataSet(data.Dataset):
         self.valid = self.train[ :len(self.train)//5]
         self.val_class_list = self.train_class_list
         """
-        print(len(self.valid))
-        print(len(self.train)//5)
+
         ###
         
         print("Done dataset init")
@@ -75,7 +79,7 @@ class myDataSet(data.Dataset):
     
     def get_embedding_matrix(self):
         if self.is_train:
-            retval = np.zeros((len(self.train_class_list),self.get_word_embed_size()))
+            retval = torch.zeros((len(self.train_class_list),self.get_word_embed_size())).float()
             j=0
             for i,em in enumerate(self.class_list):
                 if em in self.train_class_list:
@@ -83,17 +87,17 @@ class myDataSet(data.Dataset):
                     j+=1
         else:
             trainval_class_list = list(set(sorted(self.train_class_list + self.val_class_list)))
-            retval = np.zeros(( len(trainval_class_list) , self.get_word_embed_size() ))
+            retval = torch.zeros(( len(trainval_class_list) , self.get_word_embed_size() )).float()
             j=0
             for i,em in enumerate(self.class_list):
                 if em in trainval_class_list:
                     retval[j] = self.class_att_table[i]
                     j+=1
             
-        return torch.from_numpy(retval).float()
+        return retval
     
     def get_embedding_matrix_all(self):
-        return torch.from_numpy(self.class_att_table).float()
+        return self.class_att_table
         
     def get_image_embed_size(self):
         return self.feature_list.shape[1]
@@ -108,14 +112,8 @@ class myDataSet(data.Dataset):
             index = self.valid[index]
          
         img_embedding = torch.from_numpy(self.feature_list[index]).float()
-        try:
-            class_embedding = torch.from_numpy( self.class_att_table[ self.class_indices[index]] ).float()
-        except:
-            print(index)
-            print(self.class_indices[index])
-            print(self.class_att_table[ self.class_indices[index]])
-            print("--")
-            exit()
+        class_embedding = self.class_att_table[ self.class_indices[index]]
+
         
         img_path = self.image_paths[index]
        

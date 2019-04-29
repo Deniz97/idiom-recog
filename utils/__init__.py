@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 from . import TrainSet
 from . import myData
+from . import rnnData
 from . import ValSet
 from . import TestSetforTrain
 from . import transform_test_image

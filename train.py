@@ -15,6 +15,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from utils.myData import myDataSet
+from utils.rnnData import rnnData
 from utils.transform_test_image import get_test_attrs
 from utils.utils import AverageMeter, save_checkpoint, load_checkpoint
 from model.ale import ALE
@@ -84,32 +85,16 @@ def ale_loss(comps,yns):
         comp = comps[i]
         yn = yns[i]
         r = rank(yn,comp)
-        #print("RR: ",r)
         lr = get_l(r)
-        #print("LR: ",lr)
-        #print(r.grad_fn)
         lr_over_r = lr / r
-        #print("Over: ",lr_over_r)
-        #print(lr_over_r.shape)
-        #print(comp.shape)
         comp_2 = comp+get_delta(yn,class_num = comp.shape[0])-comp[yn]
-        #print(comp_2.shape)
         comp_3 = comp_2[comp_2>=0]
-        #print(comp_3.shape)
         comp_4 = lr_over_r*comp_3
-        #print(comp_4.shape)
         summ = summ + torch.sum(comp_4)
-        #print(summ.shape)
-
-
-    return summ
-
-
+    return summ/comps.shape[0]
 
 
 def get_data(args):
-
-    # Data loading code
     train_loader = torch.utils.data.DataLoader(
             myDataSet(is_train = True, features=args.features),
             batch_size=args.batch_size, shuffle=True,
@@ -122,20 +107,24 @@ def get_data(args):
     
     return train_loader, val_loader
 
+def get_data_rnn(args):
+    train_loader = torch.utils.data.DataLoader(
+            rnnData(),
+            batch_size=args.rnn_batch_size, shuffle=True,
+            num_workers=4, pin_memory=True)
+
+    val_loader = torch.utils.data.DataLoader(
+            myDataSet(idioms=train_loader.dataset.idioms, keys=train_loader.dataset.valid_keys,
+                    words=train_loader.dataset.words ),
+            batch_size=args.rnn_batch_size, shuffle=False,
+            num_workers=4, pin_memory=True)
+    
+    return train_loader, val_loader
+
 
 def top1_acc(gts,comps):
-    #print("-----------")
-    #print(gts.shape)
-    #print(gts)
-    #print(comps.shape)
-    #print(comps)
     preds = comps.max(1)[1]
-    #print(preds.shape)
-    #print(preds)
     acc= torch.sum(gts==preds).item() / comps.size(0)
-    #print(acc)
-    #print("-----------")
-    
     return acc
 
 def top5_acc(gts,comps):
@@ -162,7 +151,6 @@ def test(val_loader,args, model=None, criterion = None):
             if args.gpu:
                 img_embeds = img_embeds.cuda()
             comps = model(img_embeds)
-            #print("COOOMPS: ",comps.shape)
             if args.gpu:
                 comps = comps.cpu()
             loss_value = criterion(comps,metas["class"])
@@ -206,49 +194,33 @@ def eval_func( inp,embedding_matrix,model_dir, model = None):
     
     return retval
     
-    
+def train_rnn(args,vis):
 
-def main(args):
-    vis = visdom.Visdom(env=args.model_dir)
-    vis.check_connection()
-    args.model_dir = osp.join("./log",args.model_dir)
-    print(args.model_dir)
+    train_loader, val_loader = get_data_rnn(args)
     
-    """
-    vis_title = 'Blablablab'
-    vis_legend = ['one Loss', 'two Loss', 'Total Loss']
-    iter_plot, opts = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
-    update_vis_plot(iteration, loss_l.item(), loss_c.item(),
-                                    iter_plot,  'append', opts)
-    """
-    # np.random.seed(args.seed)
-    # torch.manual_seed(args.seed)
-    # cudnn.benchmark = True
-    train_loader, val_loader = get_data(args)
-    embedding_matrix = train_loader.dataset.get_embedding_matrix()
-    if args.gpu:
-        embedding_matrix = embedding_matrix.cuda()
-    
-    if args.test:
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=None)
-        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
-        print("Harmonic: %d" % zsl_harmonic)
-        exit()
-    
-    model = ALE(embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size(), gpu=args.gpu, dropout=args.dropout)
+    if args.att=="rnn":
+        model = torch.nn.RNN(300,300,1)
+    elif args.att=="lst":
+        model = torch.nn.LSTM(300,300,1)
+    elif args.att=="gru":
+        pass
+    elif args.att=="avg":
+        pass
+    elif args.att=="fisher":
+        pass
+    elif args.att=="label":
+        pass
     
     print(model)
     
-    if args.gpu:
-        #model = nn.DataParallel(model).cuda()
-        model = model.cuda()
-        print("is_cuda: ",next(model.parameters()).is_cuda)
-        print("device: ",next(model.parameters()).device)
+    model = nn.DataParallel(model).cuda()
+    print("is_cuda_rnn: ",next(model.parameters()).is_cuda)
+    print("device_rnn: ",next(model.parameters()).device)
     param_groups = model.parameters()
     
-    if args.cost == "ALE":
-        criterion = ale_loss
-    elif args.cost == "CEL":
+    if args.cost == "MSE":
+        criterion = torch.nn.MSELoss(
+    elif args.cost == "COS":
         print("Using cross-entrophy loss")
         criterion =torch.nn.CrossEntropyLoss()
     else:
@@ -264,13 +236,13 @@ def main(args):
                                 amsgrad=True)
 
     def adjust_lr(epoch):
-        if epoch in [5,10]:
+        if epoch in [5,10,15]:
 
             for g in optimizer.param_groups:
                 g['lr'] *= 0.1
                 print('=====> adjust lr to {}'.format(g['lr']))
     
-    best_zsl_acc = 0
+    best_harmonic = 0
     
     for epoch in range(0, args.epochs):
         adjust_lr(epoch)
@@ -293,6 +265,135 @@ def main(args):
                 comps = comps.cpu()
             loss_value = criterion(comps, metas["class"])
             loss_value = loss_value/img_embeds.size(0)
+            loss.update(loss_value.item(), img_embeds.size(0))
+                        
+            loss_value.backward()
+            if i%10==0 and False:
+                print(model.bilin.weight)
+                print()
+                print(model.bilin.weight.grad)
+                print("---")
+            optimizer.step()
+
+            with HiddenPrints():
+                acc1_train = top1_acc(metas["class"],comps)
+            acc5_train = top5_acc(metas["class"],comps)
+            acc1.update(acc1_train,img_embeds.size(0))
+            acc5.update(acc5_train,img_embeds.size(0))
+
+
+        if (epoch + 1) % args.print_freq == 0:
+            print('Epoch: [{}][{}/{}]\t Loss  {:.6f}\t Acc1 {:.3f}\t Acc5 {:.3f}\t'
+                  .format(epoch, i + 1, len(train_loader),
+                         loss.avg, acc1.avg, acc5.avg))
+        save_checkpoint({
+            'state_dict': model.state_dict(),
+            'epoch': epoch + 1
+        }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
+        
+        model.set_embedding(val_loader.dataset.get_embedding_matrix())
+        
+        acc1_val,acc5_val,loss_val = test(val_loader,args,model=model, criterion=criterion)
+        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
+        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
+        
+        print("Harmonic: %.3f" % zsl_harmonic)
+        print("------")
+        
+        ##### PLOTS
+        #Loss
+        vis.line(X=torch.ones((1,)) * epoch,
+                 Y=torch.Tensor((loss.avg,)),
+                 win='loss',
+                 update='append' if epoch > 0 else None,
+                 name="train",
+                 opts=dict(xlabel='Epoch', title='Loss', legend=['train','val'])
+                 )
+        vis.line(X=torch.ones((1,)) * epoch,
+                 Y=torch.Tensor((loss_val,)),
+                 win='loss',
+                 update='append' if epoch > 0 else None,
+                 name="val",
+                 opts=dict(xlabel='Epoch', title='Loss', legend=['train','val'])
+                 )
+        ##########
+
+        
+        if zsl_harmonic > best_harmonic:
+            best_harmonic = zsl_harmonic
+            save_checkpoint({
+                'state_dict': model.state_dict(),
+                'epoch': epoch + 1,
+                'harmonic': best_harmonic,
+            }, False, fpath=osp.join(args.model_dir, 'checkpoint_best.pth.tar'))
+
+def main(args):
+    vis = visdom.Visdom(env=args.model_dir)
+    vis.check_connection()
+    args.model_dir = osp.join("./log",args.model_dir)
+    print(args.model_dir)
+    # np.random.seed(args.seed)
+    # torch.manual_seed(args.seed)
+    # cudnn.benchmark = True
+    train_loader, val_loader = get_data(args)
+    embedding_matrix = train_loader.dataset.get_embedding_matrix()
+    embedding_matrix = embedding_matrix.cuda()
+    
+    model = ALE(embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size(), gpu=True, dropout=args.dropout)
+    
+    print(model)
+    
+    model = nn.DataParallel(model).cuda()
+    print("is_cuda: ",next(model.parameters()).is_cuda)
+    print("device: ",next(model.parameters()).device)
+    param_groups = model.parameters()
+    
+    if args.cost == "ALE":
+        criterion = ale_loss
+    elif args.cost == "CEL":
+        print("Using cross-entrophy loss")
+        criterion =torch.nn.CrossEntropyLoss()
+    else:
+        assert False, "Unknown cost function"
+    """
+    optimizer = torch.optim.SGD(param_groups, lr=args.lr,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay,
+                                nesterov=True)
+    """
+    optimizer = torch.optim.Adam(param_groups, lr=args.lr,
+                                weight_decay=args.weight_decay,
+                                amsgrad=True)
+
+    def adjust_lr(epoch):
+        if epoch in [5,10,15]:
+
+            for g in optimizer.param_groups:
+                g['lr'] *= 0.1
+                print('=====> adjust lr to {}'.format(g['lr']))
+    
+    best_harmonic = 0
+    
+    for epoch in range(0, args.epochs):
+        adjust_lr(epoch)
+        model.train()
+        model.set_embedding(train_loader.dataset.get_embedding_matrix())
+
+        loss = AverageMeter()
+        acc1 = AverageMeter()
+        acc5 = AverageMeter()
+        
+        for i,d in enumerate(train_loader):
+    
+            img_embeds, class_embeds, metas = d
+            if args.gpu:
+                img_embeds = img_embeds.cuda()
+
+            optimizer.zero_grad()
+            comps = model(img_embeds)
+            if args.gpu:
+                comps = comps.cpu()
+            loss_value = criterion(comps, metas["class"])
             loss.update(loss_value.item(), img_embeds.size(0))
                         
             loss_value.backward()
@@ -406,12 +507,12 @@ def main(args):
         ##########
 
         
-        if zsl_acc > best_zsl_acc:
-            best_zsl_acc = zsl_acc
+        if zsl_harmonic > best_harmonic:
+            best_harmonic = zsl_harmonic
             save_checkpoint({
                 'state_dict': model.state_dict(),
                 'epoch': epoch + 1,
-                'zsl_acc': zsl_acc,
+                'harmonic': best_harmonic,
             }, False, fpath=osp.join(args.model_dir, 'checkpoint_best.pth.tar'))
 
         
@@ -422,6 +523,7 @@ if __name__ == '__main__':
 
     # dat
     parser.add_argument('-b', '--batch-size', type=int, default=64)
+    parser.add_argument('--rnn-batch-size', type=int, default=64)
 
 
     # model
@@ -431,33 +533,30 @@ if __name__ == '__main__':
 
     parser.add_argument('--dropout', type=float, default=0)
     # optimizer
-    parser.add_argument('--lr', type=float, default=0.01,
-                        help="learning rate of new parameters, for pretrained "
-                             "parameters it is 10 times smaller than this")
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--rnn-lr', type=float, default=0.01)
 
-    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--wd', type=float, default=1e-4)
+    parser.add_argument('--rnn-wd', type=float, default=1e-4)
 
     # training configs
     parser.add_argument('--resume', type=str, default='', metavar='PATH')
 
     parser.add_argument('--epochs', type=int, default=20)
 
-
-    parser.add_argument('--print-freq', type=int, default=1)
-
     # misc
     working_dir = osp.dirname(osp.abspath(__file__))
 
     parser.add_argument('--model-dir', type=str, metavar='PATH', default='./model')
+    parser.add_argument('--att', type=str, metavar='PATH', default='rnn') #label,rnn, lstm, gru,avg,fisher,hocanın formülleri
 
     
     parser.add_argument('--gpu',  dest='gpu', action='store_true',
                         help='Enable gpu and cuda')
     
-    parser.add_argument('--test',  dest='test', action='store_true',
-                        help="test the results on bulent's script")
     
     parser.add_argument('--cost', type=str, metavar='PATH', default='ALE')
+    parser.add_argument('--rnn-cost', type=str, metavar='PATH', default='MSE')
     
     
     

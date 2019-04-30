@@ -103,6 +103,11 @@ class myDataSet(data.Dataset):
         return self.feature_list.shape[1]
     def get_word_embed_size(self):
         return self.class_att_table.shape[1]
+    def get_labels(self):
+        if self.is_train:
+            return self.train_class_list
+        else:
+            return self.val_class_list
 
     def __getitem__(self, index):
         orgIndex = index

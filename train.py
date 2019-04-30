@@ -13,6 +13,8 @@ import time
 import visdom
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+from torch.nn.utils.rnn import pack_padded_sequence
+from torch.nn.utils.rnn import pad_packed_sequence
 from torch.autograd import Variable
 from utils.myData import myDataSet
 from utils.rnnData import rnnData
@@ -23,34 +25,6 @@ from test import compute_dist
 from zsl_eval.evaluate import evaluate
 from visdomsave import vis
 os.environ['CUDA_VISIBLE_DEVICES'] = '2'
-
-
-
-def create_vis_plot(_xlabel, _ylabel, _title, _legend):
-    opts = dict(
-            xlabel=_xlabel,
-            ylabel=_ylabel,
-            title=_title,
-            legend=_legend
-        )
-    return viz.line(
-        X=torch.zeros((1,)).cpu(),
-        Y=torch.zeros((1, 3)).cpu(),
-        opts=opts
-    ), opts
-
-
-def update_vis_plot(iteration, zz, zzz, window1,  update_type,
-                    opts,epoch_size=1):
-    viz.line(
-        X=torch.ones((1, 3)).cpu() * iteration,
-        Y=torch.Tensor([zz, zzz, zz + zzz]).unsqueeze(0).cpu() / epoch_size,
-        win=window1,
-        update=update_type,
-        opts=opts
-    )
-    
-
 
 
 class HiddenPrints:
@@ -121,7 +95,6 @@ def get_data_rnn(args):
     
     return train_loader, val_loader
 
-
 def top1_acc(gts,comps):
     preds = comps.max(1)[1]
     acc= torch.sum(gts==preds).item() / comps.size(0)
@@ -132,27 +105,23 @@ def top5_acc(gts,comps):
     retval = sum([ 1 for (i,x) in enumerate(gts) if x.item() in preds[i] ])
     return retval / comps.size(0)
 
-def test(val_loader,args, model=None, criterion = None):
+
+def rnn_test(val_loader,args, model=None, criterion = None):
     
     #checkpoint = load_checkpoint(osp.join(model_dir, 'checkpoint.pth.tar'))
     #model.module.load_state_dict(checkpoint['state_dict'])
-    a=val_loader.dataset.get_embedding_matrix()
-    model.set_embedding(a)
-    if args.gpu:
-        model = model.cuda()
+    
+    
+    model = model.cuda()
     model.eval()
     loss = AverageMeter()
-    acc1 = AverageMeter()
-    acc5 = AverageMeter()
 
     with torch.no_grad():
         for i, d in enumerate(val_loader):
             img_embeds, class_embeds, metas = d
-            if args.gpu:
-                img_embeds = img_embeds.cuda()
+            img_embeds = img_embeds.cuda()
             comps = model(img_embeds)
-            if args.gpu:
-                comps = comps.cpu()
+            comps = comps.cpu()
             loss_value = criterion(comps,metas["class"])
             loss_value = loss_value/ img_embeds.size(0)
             loss.update(loss_value.item(), img_embeds.size(0))
@@ -168,6 +137,42 @@ def test(val_loader,args, model=None, criterion = None):
     print()
     
     return acc1.avg, acc5.avg, loss.avg
+
+
+def test(val_loader,args, model=None, criterion = None):
+    
+    #checkpoint = load_checkpoint(osp.join(model_dir, 'checkpoint.pth.tar'))
+    #model.module.load_state_dict(checkpoint['state_dict'])
+    a=val_loader.dataset.get_embedding_matrix()
+    model.set_embedding(a)
+    if args.gpu:
+        model = model.cuda()
+    model.eval()
+    loss = AverageMeter()
+    acc1 = AverageMeter()
+    acc5 = AverageMeter()
+
+    with torch.no_grad():
+
+        for i, d in enumerate(val_loader):
+            inps, targets, keys, lengths = d
+            inps = inps.cuda()
+
+            #packed the sequence
+            packed_inputs = pack_padded_sequence(inps, lengths, batch_first=True)
+            ###
+
+            packed_outs = model(packed_inputs)
+            
+            outs, out_lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_outs, batch_first=True, padding_value=0)
+            ##check this
+            outs = outs[:,lengths,:]
+            loss_value = criterion(outs, targets )
+            loss.update(loss_value.item(), inps.size(0))
+        
+    print('Loss: {:.4f}'.format(loss.avg))
+    
+    return loss.avg
 
 def eval_func( inp,embedding_matrix,model_dir, model = None):
     """
@@ -219,10 +224,10 @@ def train_rnn(args,vis):
     param_groups = model.parameters()
     
     if args.cost == "MSE":
-        criterion = torch.nn.MSELoss(
+        criterion = torch.nn.MSELoss()
     elif args.cost == "COS":
-        print("Using cross-entrophy loss")
-        criterion =torch.nn.CrossEntropyLoss()
+        coss_loss =torch.nn.CosineEmbeddingLoss() #margin can be added
+        criterion = lambda x,y:coss_loss(x,y,torch.ones((x.shape[0])))
     else:
         assert False, "Unknown cost function"
     """
@@ -231,8 +236,8 @@ def train_rnn(args,vis):
                                 weight_decay=args.weight_decay,
                                 nesterov=True)
     """
-    optimizer = torch.optim.Adam(param_groups, lr=args.lr,
-                                weight_decay=args.weight_decay,
+    optimizer = torch.optim.Adam(param_groups, lr=args.rnn_lr,
+                                weight_decay=args.rnn_wd,
                                 amsgrad=True)
 
     def adjust_lr(epoch):
@@ -242,76 +247,66 @@ def train_rnn(args,vis):
                 g['lr'] *= 0.1
                 print('=====> adjust lr to {}'.format(g['lr']))
     
-    best_harmonic = 0
+    best_loss = 0
     
     for epoch in range(0, args.epochs):
         adjust_lr(epoch)
         model.train()
-        model.set_embedding(train_loader.dataset.get_embedding_matrix())
 
         loss = AverageMeter()
-        acc1 = AverageMeter()
-        acc5 = AverageMeter()
         
         for i,d in enumerate(train_loader):
     
-            img_embeds, class_embeds, metas = d
-            if args.gpu:
-                img_embeds = img_embeds.cuda()
+            inps, targets, keys, lengths = d
+            inps = inps.cuda()
+
+            #packed the sequence
+            packed_inputs = pack_padded_sequence(inps, lengths, batch_first=True)
+
+            ###
 
             optimizer.zero_grad()
-            comps = model(img_embeds)
-            if args.gpu:
-                comps = comps.cpu()
-            loss_value = criterion(comps, metas["class"])
-            loss_value = loss_value/img_embeds.size(0)
-            loss.update(loss_value.item(), img_embeds.size(0))
+            packed_outs = model(packed_inputs)
+            
+            outs, out_lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_outs, batch_first=True, padding_value=0)
+            ##check this
+            outs = outs[:,lengths,:]
+            loss_value = criterion(outs, targets )
+            loss.update(loss_value.item(), inps.size(0))
                         
             loss_value.backward()
-            if i%10==0 and False:
-                print(model.bilin.weight)
-                print()
-                print(model.bilin.weight.grad)
-                print("---")
             optimizer.step()
-
-            with HiddenPrints():
-                acc1_train = top1_acc(metas["class"],comps)
-            acc5_train = top5_acc(metas["class"],comps)
-            acc1.update(acc1_train,img_embeds.size(0))
-            acc5.update(acc5_train,img_embeds.size(0))
 
 
         if (epoch + 1) % args.print_freq == 0:
-            print('Epoch: [{}][{}/{}]\t Loss  {:.6f}\t Acc1 {:.3f}\t Acc5 {:.3f}\t'
+            print('Epoch: [{}][{}/{}]\t Loss  {:.6f}\t'
                   .format(epoch, i + 1, len(train_loader),
-                         loss.avg, acc1.avg, acc5.avg))
+                         loss.avg))
         save_checkpoint({
             'state_dict': model.state_dict(),
             'epoch': epoch + 1
-        }, False, fpath=osp.join(args.model_dir, 'checkpoint.pth.tar'))
+        }, False, fpath=osp.join(args.model_dir, 'rnn_checkpoint.pth.tar'))
         
-        model.set_embedding(val_loader.dataset.get_embedding_matrix())
         
-        acc1_val,acc5_val,loss_val = test(val_loader,args,model=model, criterion=criterion)
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
-        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
+        test_loss_val = rnn_test(val_loader,args,model=model, criterion=criterion)
+        #zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
+        #zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
         
-        print("Harmonic: %.3f" % zsl_harmonic)
-        print("------")
+        #print("Harmonic: %.3f" % zsl_harmonic)
+        #print("------")
         
         ##### PLOTS
         #Loss
         vis.line(X=torch.ones((1,)) * epoch,
                  Y=torch.Tensor((loss.avg,)),
-                 win='loss',
+                 win='rnnloss',
                  update='append' if epoch > 0 else None,
                  name="train",
                  opts=dict(xlabel='Epoch', title='Loss', legend=['train','val'])
                  )
         vis.line(X=torch.ones((1,)) * epoch,
-                 Y=torch.Tensor((loss_val,)),
-                 win='loss',
+                 Y=torch.Tensor((test_loss_val,)),
+                 win='rnnloss',
                  update='append' if epoch > 0 else None,
                  name="val",
                  opts=dict(xlabel='Epoch', title='Loss', legend=['train','val'])
@@ -319,13 +314,19 @@ def train_rnn(args,vis):
         ##########
 
         
-        if zsl_harmonic > best_harmonic:
-            best_harmonic = zsl_harmonic
+        if best_loss > test_loss_val:
+            best_loss = test_loss_val
             save_checkpoint({
                 'state_dict': model.state_dict(),
                 'epoch': epoch + 1,
-                'harmonic': best_harmonic,
-            }, False, fpath=osp.join(args.model_dir, 'checkpoint_best.pth.tar'))
+                'harmonic': best_loss,
+            }, False, fpath=osp.join(args.model_dir, 'rnn_checkpoint_best.pth.tar'))
+
+def get_em(args,loader,model):
+    dataset = loader.dataset
+    em = torch.zeros(dataset.get_embedding_matrix().shape)
+    if args.att in ["rnn","lstm","gru"]:
+        for i,w in enumerate(dataset.)
 
 def main(args):
     vis = visdom.Visdom(env=args.model_dir)
@@ -335,7 +336,17 @@ def main(args):
     # np.random.seed(args.seed)
     # torch.manual_seed(args.seed)
     # cudnn.benchmark = True
+    
+    rnn_model = None
+    if args.att in ["rnn","lstm","gru"]:
+        rnn_model = train_rnn(args,vis)
+
     train_loader, val_loader = get_data(args)
+
+
+    train_embedding_matrix = get_em(args,train_loader,model=rnn_model)
+    val_embedding_matrix = get_em(args,val_loader,model=rnn_model)
+
     embedding_matrix = train_loader.dataset.get_embedding_matrix()
     embedding_matrix = embedding_matrix.cuda()
     

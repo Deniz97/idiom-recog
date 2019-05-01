@@ -22,7 +22,7 @@ from utils.transform_test_image import get_test_attrs
 from utils.utils import AverageMeter, save_checkpoint, load_checkpoint
 from model.ale import ALE
 from test import compute_dist
-from zsl_eval.evaluate import evaluate
+from eval_zsl.evaluate import evaluate
 from visdomsave import vis
 os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 

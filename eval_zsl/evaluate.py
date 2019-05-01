@@ -9,7 +9,7 @@ https://www.mpi-inf.mpg.de/departments/computer-vision-and-multimodal-computing/
 """
 
 import numpy as np
-from utils import load_dataset
+from .utils import load_dataset
 
 def evaluate(func, dset_name, all_em, unseen_em, model):
   """

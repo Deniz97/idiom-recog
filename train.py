@@ -70,12 +70,12 @@ def ale_loss(comps,yns):
 
 def get_data(args):
     train_loader = torch.utils.data.DataLoader(
-            myDataSet(is_train = True, db=args.dset, features=args.features),
+            myDataSet(is_train = True, db=args.dset),
             batch_size=args.batch_size, shuffle=True,
             num_workers=4, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
-            myDataSet(is_train = False, db=args.dset, features=args.features, a = train_loader.dataset.a, b = train_loader.dataset.b ),
+            myDataSet(is_train = False, db=args.dset, a = train_loader.dataset.a, b = train_loader.dataset.b ),
             batch_size=args.batch_size, shuffle=False,
             num_workers=4, pin_memory=True)
     
@@ -88,7 +88,7 @@ def get_data_rnn(args):
             num_workers=4, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
-            myDataSet(idioms=train_loader.dataset.idioms, keys=train_loader.dataset.valid_keys,
+            rnnData(idioms=train_loader.dataset.idioms, keys=train_loader.dataset.valid_keys,
                     words=train_loader.dataset.words ),
             batch_size=args.rnn_batch_size, shuffle=False,
             num_workers=4, pin_memory=True)

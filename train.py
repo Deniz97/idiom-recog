@@ -581,7 +581,7 @@ if __name__ == '__main__':
     parser.add_argument('--att', type=str, metavar='PATH', default='rnn') #label,rnn, lstm, gru,avg,fisher,hocanın formülleri
 
     
-    parser.add_argument('--gpu',  dest='gpu', action='store_true',
+    parser.add_argument('--gpu',  dest='gpu', action='store_false',
                         help='Enable gpu and cuda')
     
     

@@ -10,7 +10,7 @@ import numpy as np
 
 
 class myDataSet(data.Dataset):
-    def __init__(self, db="AWA2", is_train = True, split = 1 , att=None,a = None, b = None):
+    def __init__(self, db="AWA2", is_train = True, split = 1 , att="label",a = None, b = None):
         self.is_train = is_train  # training set or test set
         self.split = split
         self.att = att
@@ -34,7 +34,7 @@ class myDataSet(data.Dataset):
                   lines = filem.readlines()
                   lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.val_class_list = sorted(lines)
-        with open(osp.join(data_path,"unseenclasses"+str(split)+".txt"),"r") as filem:
+        with open(osp.join(data_path,"testunseenclasses.txt"),"r") as filem:
                   lines = filem.readlines()
                   lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.unseen_class_list = sorted(lines)

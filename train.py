@@ -335,16 +335,16 @@ def get_em(args,loader,model, words_dict, idioms_dict,mode="train"): #do for all
                 em[i], _ = model(words_embeds)
             elif args.att == "avg":
                 for word in words:
-                    em[i] += words_dict[word]
+                    em[i] += torch.tensor(words_dict[word]).double()
                 em[i] /= len(words)
             elif args.att=="fisher":
                 #TODO
                 pass
         else:
             if "-" in w:
-                em[i] = idioms_dict[words[0]]
+                em[i] = torch.tensor(idioms_dict[words[0]]).double()
             else:
-                em[i] = words_dict[words[0]]
+                em[i] = torch.tensor(words_dict[words[0]]).double()
 
 
     return em.float()
@@ -361,9 +361,9 @@ def main(args):
     
     rnn_model = None
     if args.att in ["rnn","lstm","gru"]:
-        rnn_model, loader = train_rnn(args,vis)
+        rnn_model, rnn_loader = train_rnn(args,vis)
     else:
-        loader,_ = get_data_rnn(args)
+        rnn_loader,_ = get_data_rnn(args)
 
     train_loader, val_loader = get_data(args)
 
@@ -397,7 +397,7 @@ def main(args):
                                 nesterov=True)
     """
     optimizer = torch.optim.Adam(param_groups, lr=args.lr,
-                                weight_decay=args.weight_decay,
+                                weight_decay=args.wd,
                                 amsgrad=True)
 
     def adjust_lr(epoch):
@@ -579,7 +579,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--model-dir', type=str, metavar='PATH', default='./model')
     parser.add_argument('--att', type=str, metavar='PATH', default='rnn') #label,rnn, lstm, gru,avg,fisher,hocanın formülleri
-
+    parser.add_argument('--mode',type=str, metavar='PATH',default=None)
     
     parser.add_argument('--gpu',  dest='gpu', action='store_false',
                         help='Enable gpu and cuda')

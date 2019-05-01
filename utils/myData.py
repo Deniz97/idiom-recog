@@ -15,10 +15,8 @@ class myDataSet(data.Dataset):
         self.split = split
         self.att = att
         ps_path = "/slow_data/denizulug/GBU/xlsa17/data"
-        if db=="AWA2":
-            data_path = osp.join(ps_path,"AWA2")
-        else:
-            assert False, "This dset not yet supported"
+        
+        data_path = osp.join(ps_path,db.upper())
             
         a= loadmat(osp.join(data_path,"att_splits.mat")) if a is None else a
         b=loadmat(osp.join(data_path,"res101.mat")) if b is None else b
@@ -36,6 +34,10 @@ class myDataSet(data.Dataset):
                   lines = filem.readlines()
                   lines = [ x.rstrip().replace("+","-") for x in lines]
                   self.val_class_list = sorted(lines)
+        with open(osp.join(data_path,"unseenclasses"+str(split)+".txt"),"r") as filem:
+                  lines = filem.readlines()
+                  lines = [ x.rstrip().replace("+","-") for x in lines]
+                  self.unseen_class_list = sorted(lines)
 
         self.feature_list = b["features"].T
         #the actul string classname
@@ -103,11 +105,17 @@ class myDataSet(data.Dataset):
         return self.feature_list.shape[1]
     def get_word_embed_size(self):
         return self.class_att_table.shape[1]
-    def get_labels(self):
-        if self.is_train:
+    def get_labels(self,mode):
+        if mode=="all":
+            return self.class_list
+        elif mode=="train":
             return self.train_class_list
-        else:
+        elif mode=="val":
             return self.val_class_list
+        elif mode=="unseen":
+            return self.unseen_class_list
+        else:
+            assert False,"Unrecognized mode"
 
     def __getitem__(self, index):
         orgIndex = index

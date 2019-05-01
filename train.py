@@ -70,12 +70,12 @@ def ale_loss(comps,yns):
 
 def get_data(args):
     train_loader = torch.utils.data.DataLoader(
-            myDataSet(is_train = True, features=args.features),
+            myDataSet(is_train = True, db=args.dset, features=args.features),
             batch_size=args.batch_size, shuffle=True,
             num_workers=4, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
-            myDataSet(is_train = False, features=args.features, a = train_loader.dataset.a, b = train_loader.dataset.b ),
+            myDataSet(is_train = False, db=args.dset, features=args.features, a = train_loader.dataset.a, b = train_loader.dataset.b ),
             batch_size=args.batch_size, shuffle=False,
             num_workers=4, pin_memory=True)
     
@@ -120,7 +120,7 @@ def rnn_test(val_loader,args, model=None, criterion = None):
         for i, d in enumerate(val_loader):
             img_embeds, class_embeds, metas = d
             img_embeds = img_embeds.cuda()
-            comps = model(img_embeds)
+            comps, _ = model(img_embeds)
             comps = comps.cpu()
             loss_value = criterion(comps,metas["class"])
             loss_value = loss_value/ img_embeds.size(0)
@@ -139,12 +139,11 @@ def rnn_test(val_loader,args, model=None, criterion = None):
     return acc1.avg, acc5.avg, loss.avg
 
 
-def test(val_loader,args, model=None, criterion = None):
+def test(val_loader,args, em=None,model=None, criterion = None):
     
     #checkpoint = load_checkpoint(osp.join(model_dir, 'checkpoint.pth.tar'))
     #model.module.load_state_dict(checkpoint['state_dict'])
-    a=val_loader.dataset.get_embedding_matrix()
-    model.set_embedding(a)
+    model.set_embedding(em)
     if args.gpu:
         model = model.cuda()
     model.eval()
@@ -174,7 +173,7 @@ def test(val_loader,args, model=None, criterion = None):
     
     return loss.avg
 
-def eval_func( inp,embedding_matrix,model_dir, model = None):
+def eval_func( inp,embedding_matrix, model):
     """
     input set X, [n_samples, d_features]
     ground-truth output embeddings (or attributes) per class, S, [n_classes, d_attributes]
@@ -186,11 +185,11 @@ def eval_func( inp,embedding_matrix,model_dir, model = None):
     model_path = osp.join(model_dir, 'checkpoint.pth.tar')
 
     embedding_matrix = torch.from_numpy(embedding_matrix).float().cuda()
-    model = ALE(embedding_matrix,img_embed_size = inp.shape[1] , gpu=True, dropout=0)
+    model.set_embedding(embedding_matrix)
     model = model.cuda()
-    with HiddenPrints():
-        checkpoint = load_checkpoint(model_path)
-        model.load_state_dict(checkpoint['state_dict'])
+    #with HiddenPrints():
+    #    checkpoint = load_checkpoint(model_path)
+    #    model.load_state_dict(checkpoint['state_dict'])
     model.eval()
     inp = torch.from_numpy(inp).cuda()
     retval = model(inp)
@@ -209,12 +208,7 @@ def train_rnn(args,vis):
         model = torch.nn.LSTM(300,300,1)
     elif args.att=="gru":
         pass
-    elif args.att=="avg":
-        pass
-    elif args.att=="fisher":
-        pass
-    elif args.att=="label":
-        pass
+
     
     print(model)
     
@@ -266,7 +260,7 @@ def train_rnn(args,vis):
             ###
 
             optimizer.zero_grad()
-            packed_outs = model(packed_inputs)
+            packed_outs, _ = model(packed_inputs)
             
             outs, out_lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_outs, batch_first=True, padding_value=0)
             ##check this
@@ -322,11 +316,39 @@ def train_rnn(args,vis):
                 'harmonic': best_loss,
             }, False, fpath=osp.join(args.model_dir, 'rnn_checkpoint_best.pth.tar'))
 
-def get_em(args,loader,model):
+    return model, train_loader
+
+def get_em(args,loader,model, words_dict, idioms_dict,mode="train"): #do for all clasees
+    if args.att=="label":
+        return loader.dataset.get_embedding_matrix()
+
     dataset = loader.dataset
-    em = torch.zeros(dataset.get_embedding_matrix().shape)
-    if args.att in ["rnn","lstm","gru"]:
-        for i,w in enumerate(dataset.)
+    labels = dataset.get_labels(mode)
+
+    em = torch.zeros((len(labels),300)).double()
+
+    for i,w in enumerate(labels):
+        words = w.split("-")
+        words_embeds = torch.zeros((1,len(words),300))
+        if args.mode=="all" or ( len(words)>1 and ((not args.mode=="available") or (not w in idioms_dict))):
+            if args.att in ["rnn","lstm","gru"]:
+                em[i], _ = model(words_embeds)
+            elif args.att == "avg":
+                for word in words:
+                    em[i] += words_dict[word]
+                em[i] /= len(words)
+            elif args.att=="fisher":
+                #TODO
+                pass
+        else:
+            if "-" in w:
+                em[i] = idioms_dict[words[0]]
+            else:
+                em[i] = words_dict[words[0]]
+
+
+    return em.float()
+
 
 def main(args):
     vis = visdom.Visdom(env=args.model_dir)
@@ -339,18 +361,20 @@ def main(args):
     
     rnn_model = None
     if args.att in ["rnn","lstm","gru"]:
-        rnn_model = train_rnn(args,vis)
+        rnn_model, loader = train_rnn(args,vis)
+    else:
+        loader,_ = get_data_rnn(args)
 
     train_loader, val_loader = get_data(args)
 
 
-    train_embedding_matrix = get_em(args,train_loader,model=rnn_model)
-    val_embedding_matrix = get_em(args,val_loader,model=rnn_model)
+    train_embedding_matrix = get_em(args,train_loader,words_dict = rnn_loader.dataset.words,idioms_dict=rnn_loader.dataset.idioms, model=rnn_model,mode="train").cuda()
+    val_embedding_matrix = get_em(args,val_loader,words_dict = rnn_loader.dataset.words,idioms_dict=rnn_loader.dataset.idioms,model=rnn_model, mode="val").cuda()
+    all_embedding_matrix = get_em(args,val_loader,words_dict = rnn_loader.dataset.words,idioms_dict=rnn_loader.dataset.idioms,model=rnn_model,mode="all").cuda()
+    unseen_embedding_matrix = get_em(args,val_loader,words_dict = rnn_loader.dataset.words,idioms_dict=rnn_loader.dataset.idioms,model=rnn_model,mode="unseen").cuda()
 
-    embedding_matrix = train_loader.dataset.get_embedding_matrix()
-    embedding_matrix = embedding_matrix.cuda()
     
-    model = ALE(embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size(), gpu=True, dropout=args.dropout)
+    model = ALE(train_embedding_matrix,img_embed_size = train_loader.dataset.get_image_embed_size(), gpu=True, dropout=args.dropout)
     
     print(model)
     
@@ -408,15 +432,10 @@ def main(args):
             loss.update(loss_value.item(), img_embeds.size(0))
                         
             loss_value.backward()
-            if i%10==0 and False:
-                print(model.bilin.weight)
-                print()
-                print(model.bilin.weight.grad)
-                print("---")
+            
             optimizer.step()
 
-            with HiddenPrints():
-                acc1_train = top1_acc(metas["class"],comps)
+            acc1_train = top1_acc(metas["class"],comps)
             acc5_train = top5_acc(metas["class"],comps)
             acc1.update(acc1_train,img_embeds.size(0))
             acc5.update(acc5_train,img_embeds.size(0))
@@ -433,8 +452,8 @@ def main(args):
         
         model.set_embedding(val_loader.dataset.get_embedding_matrix())
         
-        acc1_val,acc5_val,loss_val = test(val_loader,args,model=model, criterion=criterion)
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset_path, args.model_dir, train_loader.dataset.get_embedding_matrix_all(), model=model)
+        acc1_val,acc5_val,loss_val = test(val_loader,args,em=val_embedding_matrix, model=model, criterion=criterion)
+        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(eval_func,args.dset, all_embedding_matrix, unseen_embedding_matrix, model=model)
         zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
         
         print("Harmonic: %.3f" % zsl_harmonic)
@@ -540,7 +559,7 @@ if __name__ == '__main__':
     # model
     
     parser.add_argument('--features', type=str, default=None)
-    parser.add_argument('--dset-path', type=str, default=None)
+    parser.add_argument('--dset', type=str, default="AWA2")
 
     parser.add_argument('--dropout', type=float, default=0)
     # optimizer

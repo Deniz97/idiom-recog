@@ -10,8 +10,11 @@ https://www.mpi-inf.mpg.de/departments/computer-vision-and-multimodal-computing/
 
 import numpy as np
 from .utils import load_dataset
+import torch
+import pickle as pc
+dset = None
 
-def evaluate(func, dset_name, all_em, unseen_em, model):
+def evaluate(args,func, dset_name, all_em, unseen_em, model):
   """
   A method that evaluates zero-shot/generalized zero-shot performance of particular
   method, i.e. func, on particular dataset, i.e. one of ['CUB', 'AWA', 'SUN', 'APY']
@@ -40,12 +43,23 @@ def evaluate(func, dset_name, all_em, unseen_em, model):
       model_path, path where model parameters of func is stored. func is supposed to load these parameters.
   """
   dset_path = "/slow_data/denizulug/GBU/xlsa17/data/"+dset_name.lower()+"_bulent"
-  dset = load_dataset(dset_path, 'trva', False)
+  global dset
+  if dset is None:
+    dset = load_dataset(dset_path, '', False)
 
+  """
+  with open("bbb.txt","wb") as filem:
+    pc.dump(dset["Cte_seen"],filem)
+  with open("ccc.txt","wb") as filem:
+    pc.dump(dset["Cte_unseen"],filem)
+  exit()
+  """
   """
   average class-based zero-shot accuracy
   """
-  #scores = func(dset['Xte_unseen'], dset['Ste_unseen_gt'], model_path)
+  #if args.att=="label":
+  #scores = func(dset['Xte_unseen'], torch.tensor(dset['Ste_unseen_gt']), model)
+  #else:
   scores = func(dset['Xte_unseen'], unseen_em, model)
   preds = np.argmax(scores, 1)
   preds = dset['Cte_unseen'][preds]
@@ -54,7 +68,9 @@ def evaluate(func, dset_name, all_em, unseen_em, model):
   """
   average class-based generalized zsl accuracy on seen test classes
   """
-  #scores = func(dset['Xte_seen'], dset['Sall_gt'], model_path)
+  #if args.att=="label":
+  #  scores = func(dset['Xte_seen'], torch.tensor(dset['Sall_gt']), model)
+  #else:
   scores = func(dset['Xte_seen'], all_em, model)
   preds = np.argmax(scores, 1)
   preds = dset['Call'][preds]
@@ -63,15 +79,21 @@ def evaluate(func, dset_name, all_em, unseen_em, model):
   """
   average class-based generalized zsl accuracy on unseen test classes
   """
-  #scores = func(dset['Xte_unseen'], dset['Sall_gt'], model_path)
+  #if args.att=="label":
+  #  scores = func(dset['Xte_unseen'], torch.tensor(dset['Sall_gt']), model)
+  #else:
   scores = func(dset['Xte_unseen'], all_em , model)
   preds = np.argmax(scores, 1)
   preds = dset['Call'][preds]
   acc_gzsl_unseen = compute_acc(dset['Lte_unseen'], preds)
-
-  #print 'ZSL accuracy: ', acc_zsl
-  #print 'Generalized ZSL accuracy on seen classes: ', acc_gzsl_seen
-  #print 'Generalized ZSL accuracy on unseen classes: ', acc_gzsl_unseen
+  """
+  a = np.unique(preds)
+  b = np.unique(dset['Lte_unseen'])
+  c = np.setdiff1d(a, b, assume_unique=False)
+  print("c3: ",c)
+  exit()
+  """
+  print("ZSL: %f, Seen: %f, Unseen: %f" %(acc_zsl, acc_gzsl_seen, acc_gzsl_unseen))
 
   return acc_zsl,acc_gzsl_seen,acc_gzsl_unseen
 

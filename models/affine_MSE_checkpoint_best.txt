@@ -1,0 +1,1 @@
+Namespace(att='affine', batch_size=256, cost='ALE', crazy=True, dropout=0, dset='SUN', epochs=20, gpu='2', joint=False, joint_lr=0.05, joint_wd=0.01, kmeansk=4, lr=0.01, mode='all', model_dir='./log/delete', resume=None, rnn_batch_size=4, rnn_cost='MSE', rnn_count=50, rnn_dropout=0, rnn_epochs=30, rnn_lr=0.01, rnn_only=True, rnn_wd=1e-05, wd=0.0005)

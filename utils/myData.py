@@ -3,63 +3,83 @@ import json
 import torch.utils.data as data
 import os.path as osp
 from scipy.io import loadmat
-import random
 import torch
 import pickle as pc
 import numpy as np
+import random
 
 
 class myDataSet(data.Dataset):
-    def __init__(self, db="AWA2", is_train = True, split = 1 , att="label",a = None, b = None):
+    def __init__(self, db="AWA2", is_train = "train", split = 1, a = None, b = None, is_in = None):
         self.is_train = is_train  # training set or test set
         self.split = split
-        self.att = att
         ps_path = "/slow_data/denizulug/GBU/xlsa17/data"
-        
+        #embeddings = set(embeddings)
         data_path = osp.join(ps_path,db.upper())
-            
         a= loadmat(osp.join(data_path,"att_splits.mat")) if a is None else a
         b=loadmat(osp.join(data_path,"res101.mat")) if b is None else b
         self.a = a
         self.b = b
+        self.only_existing = False #hand set
         with open(osp.join(data_path,"allclasses.txt"),"r") as filem:
-                  lines = filem.readlines()
-                  lines = [ x.rstrip().replace("+","-") for x in lines]
-                  self.class_list = lines
-        with open(osp.join(data_path,"trainclasses"+str(split)+".txt"),"r") as filem:
-                  lines = filem.readlines()
-                  lines = [ x.rstrip().replace("+","-") for x in lines]
-                  self.train_class_list = sorted(lines)
-        with open(osp.join(data_path,"valclasses"+str(split)+".txt"),"r") as filem:
-                  lines = filem.readlines()
-                  lines = [ x.rstrip().replace("+","-") for x in lines]
-                  self.val_class_list = sorted(lines)
-        with open(osp.join(data_path,"testunseenclasses.txt"),"r") as filem:
-                  lines = filem.readlines()
-                  lines = [ x.rstrip().replace("+","-") for x in lines]
-                  self.unseen_class_list = sorted(lines)
+            lines = filem.readlines()
+            lines = [ x.rstrip().replace("+","-").replace("_","-") for x in lines]
+            self.class_list = lines
+            self.org_class_list = lines
+            if self.only_existing:
+                self.class_list = [ x for x in self.class_list if is_in(x) ]
 
-        self.feature_list = b["features"].T
+        with open(osp.join(data_path,"trainclasses"+str(split)+".txt"),"r") as filem:
+            lines = filem.readlines()
+            lines = [ x.rstrip().replace("+","-").replace("_","-") for x in lines]
+            self.train_class_list = lines
+            if self.only_existing:
+                self.train_class_list = [ x for x in self.train_class_list if is_in(x) ]
+        with open(osp.join(data_path,"valclasses"+str(split)+".txt"),"r") as filem:
+            lines = filem.readlines()
+            lines = [ x.rstrip().replace("+","-").replace("_","-") for x in lines]
+            self.val_class_list = lines
+            if self.only_existing:
+                self.val_class_list = [ x for x in self.val_class_list if is_in(x) ]
+            #self.trainval_class_list = list(set(sorted(self.train_class_list + self.val_class_list)))
+            self.trainval_class_list = self.val_class_list
+        with open(osp.join(data_path,"testclasses.txt"),"r") as filem:
+            lines = filem.readlines()
+            lines = [ x.rstrip().replace("+","-").replace("_","-") for x in lines]
+            self.unseen_class_list = sorted(lines)
+            if self.only_existing:
+                self.unseen_class_list = [ x for x in self.unseen_class_list if is_in(x) ]
+        self.trainval_class_list = self.class_list
+
+        #with open("scaler.pc","rb") as filem:
+        #    scaler = pc.load(filem)
+        #    self.scaler = scaler["scaler"]
+        #    self.max = scaler["max"]
+        self.feature_list = b["features"].T.astype(float)
+        #self.norm = True
+        #if self.norm:
+        #    old = self.feature_list
+        #    self.feature_list = self.scaler.transform(self.feature_list, copy=True)
+        #    self.feature_list = self.feature_list.astype(float)
+        #    self.feature_list /= self.max 
+
+        self.feature_list = torch.from_numpy( self.feature_list ).float()
         #the actul string classname
-        self.label_list = [ self.class_list[x[0]-1] for x in b["labels"]]
+        self.label_list = [ self.org_class_list[x[0]-1] for x in b["labels"]]
+        #self.label_list = [ x for x in self.org_label_list if x in self.class_list ]
         #indexed class index
-        self.class_indices = [ x[0]-1 for x in b["labels"] ]
         self.image_paths = [ x[0][0].replace("/BS/xian/work/data/","/slow_data/denizulug/").replace("//","/") for x in b["image_files"]]
-        if self.att == "label":
-            self.class_att_table = torch.from_numpy(a["att"].T).float()
-        else:
-            with open("/slow_data/denizulug/GBU/xlsa17/data/"+db+"/embeddings_"+self.att+".pc","rb")as filem:
-                dic = pc.load(filem)
-                l = len(dic[list(dic.keys())[0]])
-                self.class_att_table = torch.zeros((len(self.class_list),l)).float()
-                for i,label in enumerate(dic):
-                    self.class_att_table[self.class_list.index(label)] = torch.tensor(dic[label]).float()
+        self.class_att_table = torch.from_numpy(a["att"].T).float()
 
         self.train, self.valid  = [], []
         #self.train = [ x[0]-1 for x in a["train_loc"] ] if self.is_train else []
         #self.valid = [ x[0]-1 for x in a["val_loc"] ] if not self.is_train else []
-        self.train = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.train_class_list ] if self.is_train else []
-        self.valid = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.val_class_list ] if not self.is_train else []
+        s_train_class_list = set(self.train_class_list)
+        s_val_class_list = set(self.val_class_list)
+        self.train = [] if not self.is_train == "train" else  [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in s_train_class_list ] 
+        self.valid = [] if not self.is_train == "val" else [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in s_val_class_list ] 
+        self.seen = [] if not self.is_train == "seen" else [ x[0]-1 for x in a["test_seen_loc"] ] 
+        self.unseen = [] if not self.is_train == "unseen" else [ x[0]-1 for x in a["test_unseen_loc"] ] 
         ###over fitting
         """
         self.train = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.train_class_list ]
@@ -69,32 +89,57 @@ class myDataSet(data.Dataset):
         """
 
         ###
-        
-        print("Done dataset init")
+        self._calc_sample_per_class()
     
-    def get_class_table(self,data_path):
-        osp.join(data_path,"allclasses.txt")
-        pass
     
-    def _calc_mean(self):
-        pass
+
+    def _calc_sample_per_class(self):
+        ##train
+        retval = torch.zeros(len(self.train_class_list)).int()
+        for i in self.train:
+            retval[self.train_class_list.index(self.label_list[i])] += 1
+        self.train_sample_per_class = retval
+        #print(retval.shape)
+        #print(retval[retval!=0].shape)
+
+        ##val
+        if self.is_train=="val":
+            retval = torch.zeros(len(self.trainval_class_list)).int()
+            for i in self.valid:
+                retval[self.trainval_class_list.index(self.label_list[i])] += 1
+            #print(retval.shape)
+            #print(retval[retval!=0].shape)
+            self.valid_sample_per_class = retval
+
+        ## seen
+        elif self.is_train=="seen":
+            retval = torch.zeros(len(self.trainval_class_list)).int()
+            for i in self.seen:
+                retval[self.trainval_class_list.index(self.label_list[i])] += 1
+            #print(retval.shape)
+            #print(retval[retval!=0].shape)
+            self.valid_sample_per_class = retval
+
+        ##unseen
+        elif self.is_train=="unseen":
+            retval = torch.zeros(len(self.trainval_class_list)).int()
+            for i in self.unseen:
+                retval[self.trainval_class_list.index(self.label_list[i])] += 1
+            #print(retval.shape)
+            #print(retval[retval!=0].shape)
+            self.valid_sample_per_class = retval
     
     def get_embedding_matrix(self):
-        if self.is_train:
+        if self.is_train == "train":
             retval = torch.zeros((len(self.train_class_list),self.get_word_embed_size())).float()
-            j=0
             for i,em in enumerate(self.class_list):
                 if em in self.train_class_list:
-                    retval[j] = self.class_att_table[i]
-                    j+=1
+                    retval[self.train_class_list.index(em)] = self.class_att_table[i]
         else:
-            trainval_class_list = list(set(sorted(self.train_class_list + self.val_class_list)))
-            retval = torch.zeros(( len(trainval_class_list) , self.get_word_embed_size() )).float()
-            j=0
-            for i,em in enumerate(self.class_list):
-                if em in trainval_class_list:
-                    retval[j] = self.class_att_table[i]
-                    j+=1
+            retval = torch.zeros(( len(self.trainval_class_list) , self.get_word_embed_size() )).float()
+            for i,cl in enumerate(self.class_list):
+                if cl in self.trainval_class_list:
+                    retval[self.trainval_class_list.index(cl)] = self.class_att_table[i]
             
         return retval
     
@@ -111,7 +156,7 @@ class myDataSet(data.Dataset):
         elif mode=="train":
             return self.train_class_list
         elif mode=="val":
-            return self.val_class_list
+            return self.trainval_class_list
         elif mode=="unseen":
             return self.unseen_class_list
         else:
@@ -119,30 +164,35 @@ class myDataSet(data.Dataset):
 
     def __getitem__(self, index):
         orgIndex = index
-        if self.is_train:
+        if self.is_train == "train":
             index = self.train[index]
-        else:
+        elif self.is_train == "val":
             index = self.valid[index]
+        elif self.is_train == "seen":
+            index = self.seen[index]
+        elif self.is_train == "unseen":
+            index = self.unseen[index]
          
-        img_embedding = torch.from_numpy(self.feature_list[index]).float()
-        class_embedding = self.class_att_table[ self.class_indices[index]]
-
+        img_embedding = self.feature_list[index]
         
         img_path = self.image_paths[index]
        
         
         # Save meta data
-        meta = {'index': orgIndex, 'path' : img_path, "label" : self.label_list[index], "class" : self.train_class_list.index(self.label_list[index]) if self.is_train 
-               else self.val_class_list.index(self.label_list[index]) }
+        meta = {'index': orgIndex, 'path' : img_path, "label" : self.label_list[index], "class" : self.train_class_list.index(self.label_list[index]) if self.is_train == "train" 
+               else self.trainval_class_list.index(self.label_list[index]), "is_idiom" : 1 if len(self.label_list[index].split("-"))>1 else 0  }
 
-        
-        return img_embedding, class_embedding, meta
+        return img_embedding, meta
 
     def __len__(self):
-        if self.is_train:
+        if self.is_train == "train":
             return len(self.train)
-        else:
+        if self.is_train == "val":
             return len(self.valid)
+        if self.is_train == "seen":
+            return len(self.seen)
+        if self.is_train == "unseen":
+            return len(self.unseen)
         
         
         

@@ -11,7 +11,7 @@ https://www.mpi-inf.mpg.de/departments/computer-vision-and-multimodal-computing/
 import numpy as np
 import h5py
 from sklearn.preprocessing import StandardScaler
-
+import pickle as pc
 def load_dataset(path, normalization='tr', verbose=False):
   """
   Loads dataset file compatible with h5py.
@@ -50,12 +50,16 @@ def load_dataset(path, normalization='tr', verbose=False):
     scaler.transform(dset['Xva'])
 
     max_ = np.max(dset['Xtr'])
+    with open("scaler.pc","wb") as filem:
+        pc.dump( {"scaler":scaler,"max":max_} ,filem)
+        print("saved scaler")
     dset['Xtr'] /= max_
     dset['Xva'] /= max_
 
   elif normalization == 'trva':
     scaler = StandardScaler(copy=False)
     scaler.fit(dset['Xtrva'])
+    
     scaler.transform(dset['Xtrva'])
     scaler.transform(dset['Xte_seen'])
     scaler.transform(dset['Xte_unseen'])

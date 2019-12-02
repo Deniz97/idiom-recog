@@ -26,12 +26,14 @@ class ALE(nn.Module):
             self.dropout = nn.Dropout(p=dropout)
 
     def set_embedding(self,em):
+        #print("GRADDD3: ",em.requires_grad)
         self.embedding_matrix = em.float().cuda()
+        #print("GRADDD2: ",self.embedding_matrix.requires_grad)
         self.word_embed_size = em.shape[1]
         self.num_class = em.shape[0]
         self.expanded_em = torch.zeros((self.num_class,self.batch_size,self.word_embed_size)).cuda()
         for i in range(self.num_class):
-            self.expanded_em[i] = self.embedding_matrix[i].expand(self.batch_size,self.word_embed_size).contiguous()
+            self.expanded_em[i] = self.embedding_matrix[i].expand(self.batch_size,self.word_embed_size).contiguous().requires_grad_()
     def forward(self, x):
         if self.dropout:
             x = self.dropout(x)
@@ -43,7 +45,7 @@ class ALE(nn.Module):
         else:
             for i in range(self.num_class):
                 retval[:,i] = self.bilin(x , self.expanded_em[i] ).squeeze()
-
+        #print("GRAD: ",self.expanded_em.requires_grad)
         #retval = self.softm(retval)
         return retval
 

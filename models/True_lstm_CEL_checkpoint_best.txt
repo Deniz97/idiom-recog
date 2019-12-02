@@ -1,1 +1,0 @@
-Namespace(att='lstm', batch_size=64, cost='CEL', crazy=True, dropout=0, dset='SUN', epochs=20, gpu='0', joint=True, joint_lr=0.0001, joint_wd=5e-05, kmeansk=3, lr=0.0005, mode='all', model_dir='./log/delete', resume=None, rnn_batch_size=256, rnn_cost='COS', rnn_count=50, rnn_dropout=0, rnn_epochs=30, rnn_lr=0.05, rnn_only=False, rnn_wd=0.0001, wd=0.05)

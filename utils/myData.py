@@ -50,7 +50,7 @@ class myDataSet(data.Dataset):
             if self.only_existing:
                 self.unseen_class_list = [ x for x in self.unseen_class_list if is_in(x) ]
         self.trainval_class_list = self.class_list
-
+        print("loaded classes - dataset")
         #with open("scaler.pc","rb") as filem:
         #    scaler = pc.load(filem)
         #    self.scaler = scaler["scaler"]
@@ -80,6 +80,7 @@ class myDataSet(data.Dataset):
         self.valid = [] if not self.is_train == "val" else [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in s_val_class_list ] 
         self.seen = [] if not self.is_train == "seen" else [ x[0]-1 for x in a["test_seen_loc"] ] 
         self.unseen = [] if not self.is_train == "unseen" else [ x[0]-1 for x in a["test_unseen_loc"] ] 
+        print("loaded indexes - dataset")
         ###over fitting
         """
         self.train = [ x[0]-1 for x in a["trainval_loc"] if self.label_list[x[0]-1] in self.train_class_list ]
@@ -95,12 +96,13 @@ class myDataSet(data.Dataset):
 
     def _calc_sample_per_class(self):
         ##train
-        retval = torch.zeros(len(self.train_class_list)).int()
-        for i in self.train:
-            retval[self.train_class_list.index(self.label_list[i])] += 1
-        self.train_sample_per_class = retval
-        #print(retval.shape)
-        #print(retval[retval!=0].shape)
+        if self.is_train == "train":
+            retval = torch.zeros(len(self.train_class_list)).int()
+            for i in self.train:
+                retval[self.train_class_list.index(self.label_list[i])] += 1
+            self.train_sample_per_class = (self.train_class_list, retval)
+            #print(retval.shape)
+            #print(retval[retval!=0].shape)
 
         ##val
         if self.is_train=="val":
@@ -109,7 +111,7 @@ class myDataSet(data.Dataset):
                 retval[self.trainval_class_list.index(self.label_list[i])] += 1
             #print(retval.shape)
             #print(retval[retval!=0].shape)
-            self.valid_sample_per_class = retval
+            self.valid_sample_per_class = (self.trainval_class_list, retval)
 
         ## seen
         elif self.is_train=="seen":
@@ -118,7 +120,7 @@ class myDataSet(data.Dataset):
                 retval[self.trainval_class_list.index(self.label_list[i])] += 1
             #print(retval.shape)
             #print(retval[retval!=0].shape)
-            self.valid_sample_per_class = retval
+            self.valid_sample_per_class = (self.trainval_class_list, retval)
 
         ##unseen
         elif self.is_train=="unseen":
@@ -127,7 +129,7 @@ class myDataSet(data.Dataset):
                 retval[self.trainval_class_list.index(self.label_list[i])] += 1
             #print(retval.shape)
             #print(retval[retval!=0].shape)
-            self.valid_sample_per_class = retval
+            self.valid_sample_per_class = (self.trainval_class_list, retval)
     
     def get_embedding_matrix(self):
         if self.is_train == "train":

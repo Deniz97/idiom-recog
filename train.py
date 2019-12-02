@@ -24,21 +24,25 @@ from utils.rnnData import rnnData
 from utils.transform_test_image import get_test_attrs
 from utils.utils import AverageMeter, save_checkpoint, load_checkpoint
 from model.ale import ALE
-from test import compute_dist
 from eval_zsl.evaluate import evaluate
 from visdomsave import vis
 from model.affine import Affine
 from model.fc import FC
 from progress.bar import Bar
 import pickle as pc
+from argparse import Namespace
+
+perclass_accs_global = {}
 
 def draw_vis(vis,title,name,epoch,value,legend):
-        vis.line(X=torch.ones((1,)) * epoch,
-                 Y=torch.Tensor((value,)),
-                 win = title,
-                 update='append' if epoch > 0 else None,
-                 name=name,
-                 opts=dict(xlabel='Epoch', title = title , legend= legend ))
+    if vis is None:
+        return
+    vis.line(X=torch.ones((1,)) * epoch,
+             Y=torch.Tensor((value,)),
+             win = title,
+             update='append' if epoch > 0 else None,
+             name=name,
+             opts=dict(xlabel='Epoch', title = title , legend= legend ))
 
 class HiddenPrints:
     def __enter__(self):
@@ -57,8 +61,8 @@ def get_delta(yn, class_num):
 def rank(yn,comp):
     comp = comp.detach()
     comp_l = comp  + get_delta(yn,class_num=comp.shape[0])
-    mygte = torch.ones(comp.shape).int()[comp_l>=comp[yn]]
-    return torch.sum(mygte).float().ceil().int().item()
+    mygte = torch.ones(comp.shape)[comp_l>=comp[yn]]
+    return int(torch.sum(mygte).item())
     
 def get_l(r):
     return sum([1/i for i in range(1,r+1)])
@@ -90,30 +94,30 @@ def get_data(args, is_in):
             num_workers=4, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(
             myDataSet(is_train = "val", db=args.dset, a = train_loader.dataset.a, b = train_loader.dataset.b, is_in = is_in ),
-            batch_size=args.batch_size, shuffle=False,
+            batch_size=1024, shuffle=False,
             num_workers=4, pin_memory=True)
     seen_loader = torch.utils.data.DataLoader(
             myDataSet(is_train = "seen", db=args.dset, a = train_loader.dataset.a, b = train_loader.dataset.b, is_in = is_in ),
-            batch_size=args.batch_size, shuffle=False,
+            batch_size=1024, shuffle=False,
             num_workers=4, pin_memory=True)
     unseen_loader = torch.utils.data.DataLoader(
             myDataSet(is_train = "unseen", db=args.dset, a = train_loader.dataset.a, b = train_loader.dataset.b, is_in = is_in ),
-            batch_size=args.batch_size, shuffle=False,
+            batch_size=1024, shuffle=False,
             num_workers=4, pin_memory=True)
     
     return train_loader, val_loader, seen_loader, unseen_loader
 
 def get_data_rnn(args):
     train_loader = torch.utils.data.DataLoader(
-            rnnData(counts = args.rnn_count),
-            batch_size=args.rnn_batch_size, shuffle=True,
-            num_workers=4, pin_memory=True)
+            rnnData( args=args),
+            batch_size=args.rnn_batch_size, shuffle=True, pin_memory = True,
+            num_workers=4)
 
     val_loader = torch.utils.data.DataLoader(
-            rnnData(idioms=train_loader.dataset.idioms, keys=train_loader.dataset.valid_keys,
-                    words=train_loader.dataset.words, counts = args.rnn_count ),
-            batch_size=args.rnn_batch_size, shuffle=False,
-            num_workers=4, pin_memory=True)
+            rnnData( keys=train_loader.dataset.valid_keys,
+                    embeddings=train_loader.dataset.embeddings,  args=args ),
+            batch_size=args.rnn_batch_size, shuffle=False, pin_memory = True,
+            num_workers=4)
     
     return train_loader, val_loader
 
@@ -143,9 +147,9 @@ def top1_acc_perclass(gts,comps,res):
     #print(gts.shape)
     #print("New res: ",res.sum())
 
-def calc_perclass(res,counts):
+def calc_perclass(res,counts,strm):
     
-
+    labels, counts = counts
     #print("Res sum: %d, Counts sum: %d" % (res.sum(),counts.sum()))
     for i,r in enumerate(res):
         if res[i] > 0:
@@ -156,6 +160,16 @@ def calc_perclass(res,counts):
         if counts[i] != 0:
             res[i] = res[i] / counts[i]
 
+
+    ###LOG
+    perclass_accs_global[strm] = {}
+    for i,l in enumerate(labels):
+        if counts[i] != 0:
+            perclass_accs_global[strm][l] = res[i].item()
+
+        
+    ##
+
     #print("\nOut of %d" % counts[counts!=0].sum() )
     #print()
     #print("-----------")
@@ -163,7 +177,9 @@ def calc_perclass(res,counts):
     #print(res.shape)
     #print(res[res!=0].shape)
     res = res.sum()
-    res = res / counts[counts!=0].shape[0]
+    kk = counts!=0
+    cc = counts[kk].shape[0]
+    res = res / cc
 
     #print("counts: ",counts[counts!=0].shape)
     return res
@@ -202,7 +218,7 @@ def test(val_loader,args, em=None, model=None, criterion = None, strm="Validatio
             bar_val.next()
         bar_val.finish() 
         
-    accpc = calc_perclass(perclass_accuracies,val_loader.dataset.valid_sample_per_class).item()
+    accpc = calc_perclass(perclass_accuracies,val_loader.dataset.valid_sample_per_class,strm).item()
     print(strm+" acc_pc: %f" % accpc)
     
     return acc1.avg, acc5.avg, accpc, loss.avg
@@ -215,7 +231,9 @@ def pack_seq(inps,targets,keys,lengths):
     targets = targets[sort_order,...]
     keys = np.asarray(keys)
     keys = keys[sort_order,...]
+    
     packed_inputs = pack_padded_sequence(inps, lengths, batch_first=True)
+
     return packed_inputs, targets, keys
 
 def unpack_seq(packed_outs):
@@ -229,17 +247,21 @@ def unpack_seq(packed_outs):
 def lstm2_pre(inps,lengths):
 
     if inps.shape[1] == 1:
-        hidden = torch.zeros((1,inps.shape[0],300))
+        hidden = torch.zeros((1,inps.shape[0],300)).cuda()
         lengths = lengths - 1
         return inps, hidden, lengths
     else:
-        inps = inps[:,1:,...]
-        hidden = inps[:,:1,...].cuda()
-        hidden = hidden.permute(1,0,2).contiguous()
-        lengths = lengths - 1
+        hidden = torch.zeros((1,inps.shape[0],300)).cuda()
+        for i,inp in enumerate(inps):
+            if lengths[i] == 1:
+                continue
+            else:
+                inps[i] = torch.cat ( ( inps[i][1:,...].cuda(), torch.zeros((1,300)).cuda() ), 0  ).cuda()
+                hidden[0][i] = inps[i][:1,...].cuda()
+                lengths[i] = lengths[i] - 1
         return inps, hidden, lengths
 
-def rnn_test(val_loader,args,model=None, criterion = None):
+def rnn_test(val_loader,args,model=None, criterion = None,epoch=0):
 
     model = model.cuda()
     model.eval()
@@ -262,7 +284,7 @@ def rnn_test(val_loader,args,model=None, criterion = None):
             outs = outs.cpu()
             loss_value = criterion(outs, targets )
             loss.update(loss_value.item(), inps.size(0))
-            bar.suffix = 'Epoch: [{}][{}/{}]  Loss  {:.6f}\t'.format(0, i + 1, len(val_loader),loss.avg)
+            bar.suffix = 'Epoch: [{}][{}/{}] \t\t Loss  {:.6f}'.format(epoch, i + 1, len(val_loader),loss.avg)
             bar.next()
         bar.finish()
     
@@ -287,11 +309,42 @@ def eval_func( inp,embedding_matrix, model):
     
     return retval
 
-def train_rnn(args,vis):
-	print(str(args))
-    print(args.model_dir)
-    train_loader, val_loader = get_data_rnn(args)
+
+def train_rnn_tick(train_loader,args,model,optimizer,criterion,epoch):
+    train_loader.dataset.epoch = epoch
+    loss = AverageMeter()
+    bar = Bar('Training', max=len(train_loader))
+    for i,d in enumerate(train_loader):
     
+        inps, targets, keys, lengths = d
+        inps = inps.cuda()
+        
+        if args.att == "lstm2":
+            inps, hidden, lengths = lstm2_pre(inps,lengths)
+            packed_inputs, targets, keys = pack_seq(inps,targets,keys, lengths)
+            optimizer.zero_grad()
+            outs, _ = model(packed_inputs,(hidden,torch.zeros(hidden.shape).cuda()) )
+        else:
+            packed_inputs, targets, keys = pack_seq(inps,targets,keys, lengths)
+            optimizer.zero_grad()
+            outs, _ = model(packed_inputs)
+
+        if args.att in ["rnn","lstm","gru","lstm2"]:
+            outs = unpack_seq(outs)
+        outs = outs.cpu()
+        loss_value = criterion(outs, targets )
+        loss.update(loss_value.item(), inps.size(0))
+                    
+        loss_value.backward()
+        optimizer.step()
+        bar.suffix = 'Epoch: [{}][{}/{}]\t Loss  {:.6f}\t'.format(epoch, i + 1, len(train_loader),loss.avg)
+        bar.next()
+    bar.finish()
+
+def train_rnn(args,vis):
+    print(str(args))
+    train_loader, val_loader = get_data_rnn(args)
+    print("Done loading data")
     if args.att=="rnn":
         model = torch.nn.RNN(300,300,1)
     elif args.att in ["lstm","lstm2"]:
@@ -319,7 +372,7 @@ def train_rnn(args,vis):
         coss_loss =torch.nn.CosineEmbeddingLoss() #margin can be added
         criterion = lambda x,y:coss_loss(x,y,torch.ones((x.shape[0])))
     else:
-        assert False, "Unknown cost function"
+        assert False, "Unknown rnn cost function"
     """
     optimizer = torch.optim.SGD(param_groups, lr=args.lr,
                                 momentum=args.momentum,
@@ -339,64 +392,38 @@ def train_rnn(args,vis):
     
     best_loss = 100
     best_epoch = -1
+    print("starting training")
     for epoch in range(0, args.rnn_epochs):
         adjust_lr(epoch)
         model.train()
+        
 
-        loss = AverageMeter()
-
-        bar = Bar('Training', max=len(train_loader))
-        for i,d in enumerate(train_loader):
-    
-            inps, targets, keys, lengths = d
-            inps = inps.cuda()
-            
-            if args.att == "lstm2":
-                inps, hidden, lengths = lstm2_pre(inps,lengths)
-                packed_inputs, targets, keys = pack_seq(inps,targets,keys, lengths)
-                optimizer.zero_grad()
-                outs, _ = model(packed_inputs,(hidden,torch.zeros(hidden.shape).cuda()) )
-            else:
-                packed_inputs, targets, keys = pack_seq(inps,targets,keys, lengths)
-                optimizer.zero_grad()
-                outs, _ = model(packed_inputs)
-
-            if args.att in ["rnn","lstm","gru","lstm2"]:
-                outs = unpack_seq(outs)
-            outs = outs.cpu()
-            loss_value = criterion(outs, targets )
-            loss.update(loss_value.item(), inps.size(0))
-                        
-            loss_value.backward()
-            optimizer.step()
-            bar.suffix = 'Epoch: [{}][{}/{}]\t Loss  {:.6f}\t'.format(epoch, i + 1, len(train_loader),loss.avg)
-            bar.next()
-        bar.finish()
+        train_rnn_tick(train_loader,args,model,optimizer,criterion,epoch)
         
         
-        
-        test_loss_val = rnn_test(val_loader,args,model=model, criterion=criterion)
+        test_loss_val = rnn_test(val_loader,args,model=model, criterion=criterion,epoch=epoch)
         
         ##### PLOTS
         #Loss
-        vis.line(X=torch.ones((1,)) * epoch,
-                 Y=torch.Tensor((loss.avg,)),
-                 win='rnnloss',
-                 update='append' if epoch > 0 else None,
-                 name="rnntrain",
-                 opts=dict(xlabel='Epoch', title='rnnLoss', legend=['rnntrain','rnnval'])
-                 )
-        vis.line(X=torch.ones((1,)) * epoch,
-                 Y=torch.Tensor((test_loss_val,)),
-                 win='rnnloss',
-                 update='append' if epoch > 0 else None,
-                 name="rnnval",
-                 opts=dict(xlabel='Epoch', title='rnnLoss', legend=['rnntrain','rnnval'])
-                 )
+        if vis is not None:
+            vis.line(X=torch.ones((1,)) * epoch,
+                     Y=torch.Tensor((loss.avg,)),
+                     win='rnnloss',
+                     update='append' if epoch > 0 else None,
+                     name="rnntrain",
+                     opts=dict(xlabel='Epoch', title='rnnLoss', legend=['rnntrain','rnnval'])
+                     )
+            vis.line(X=torch.ones((1,)) * epoch,
+                     Y=torch.Tensor((test_loss_val,)),
+                     win='rnnloss',
+                     update='append' if epoch > 0 else None,
+                     name="rnnval",
+                     opts=dict(xlabel='Epoch', title='rnnLoss', legend=['rnntrain','rnnval'])
+                    )
         ##########
 
         
-        if best_loss - best_loss/100 > test_loss_val:
+        if vis is None and best_loss - best_loss/100 > test_loss_val:
             best_loss = test_loss_val
             best_epoch = epoch
             with open("rnn_results.pc","rb") as filem:
@@ -404,6 +431,8 @@ def train_rnn(args,vis):
             key = args.att+"_"+args.rnn_cost
             if key not in rnn_results or rnn_results[key]["best_loss"] - rnn_results[key]["best_loss"]/100 > test_loss_val:
                 print("FOUND NEW BEST: ",key)
+                with open("what_changed.txt","w") as filem:
+                    filem.write("Found new best: %s\n" % key)
                 rnn_results[key] = {}
                 rnn_results[key]["args"] = args
                 rnn_results[key]["best_loss"] = test_loss_val
@@ -418,7 +447,8 @@ def train_rnn(args,vis):
                 with open("./models/"+key+'_checkpoint_best.txt',"w") as filem:
                     filem.write(str(args))
 
-    return model, train_loader, best_loss, best_epoch
+    if vis is None:
+        return model, train_loader, best_loss, best_epoch
 
 def get_em(args,loader, rnn_loader,model,fv,mode="train"): #do for all clasees
     
@@ -445,14 +475,14 @@ def get_em(args,loader, rnn_loader,model,fv,mode="train"): #do for all clasees
         words = w.split("-")
         word_embeds = torch.zeros((1,len(words),300))
         for idx,word in enumerate(words):
-            word_embeds[0][idx] = rnn_loader.dataset.get_word_embedding(word)
+            word_embeds[0][idx] = rnn_loader.dataset.get_embedding(word)
         if args.mode != "nall" and ( len(words)>1 or args.att == "fisher" or args.mode=="all" ):
             if args.att in ["rnn","lstm","gru"]:
                 inp = word_embeds.permute(1,0,2).contiguous().cuda()
                 temp, _ = model(inp)
                 em[i] = temp[-1,0,:]
             if args.att == "lstm2":
-                inps,hidden, _ = lstm2_pre(word_embeds,torch.zeros((10)))
+                inps,hidden, _ = lstm2_pre(word_embeds.cuda(),torch.zeros((10)))
                 inps = inps.permute(1,0,2).contiguous().cuda()
                 
                 temp, _ = model(inps,(hidden.cuda(),torch.zeros(hidden.shape).cuda()))
@@ -468,15 +498,17 @@ def get_em(args,loader, rnn_loader,model,fv,mode="train"): #do for all clasees
                 em[i] = temp[0].cpu()
         else:
             if "-" in w:
-                em[i] = rnn_loader.dataset.get_idiom_embedding(w)
+                em[i] = rnn_loader.dataset.get_embedding(w)
             else:
                 em[i] = word_embeds[0][0]
-
     if fv is not None:
         fv.print_stats()
     if not args.joint:
         em = em.detach()
-    return em
+    retval = torch.zeros(em.shape).float().cuda()
+    for i,e in enumerate(em):
+        retval[i] = em[i] / torch.norm(em[i],p=2)
+    return retval
 
 class FisherVector:
     def __init__(self,words,kmeansk, vis=None):
@@ -512,18 +544,21 @@ class FisherVector:
         if self.vis is not None:
             vis.text(self.stats,"fvStats")
 
-def main(args,vis):
-    
+def main(args,vis,):
+    best_seen = -1
+    best_harmonic = -1
+    best_epoch = -1
+    best_unseen = -1
     print(str(args))
-    print(args.model_dir)
     # np.random.seed(args.seed)
     # torch.manual_seed(args.seed)
     # cudnn.benchmark = True
-    vis.text(str(args),win="args")
+    if vis is not None:
+        vis.text(str(args),win="args")
     rnn_model = None
     fv = None
     best_harmonic = 0
-    
+    torch.autograd.set_detect_anomaly(True)
     if args.att in ["rnn","lstm","gru","affine","fc","lstm2"]:
         #rnn_model, rnn_loader, best_loss, best_epoch = train_rnn(args,vis)
         rnn_loader,_ = get_data_rnn(args)
@@ -553,7 +588,7 @@ def main(args,vis):
     print(rnn_model)
 
     train_loader, val_loader, seen_loader, unseen_loader = get_data(args,rnn_loader.dataset.is_in)
-
+    print("Got data")
     train_embedding_matrix = get_em(args,train_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv,mode="train").cuda()
     val_embedding_matrix = get_em(args,val_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv, mode="val").cuda()
     all_embedding_matrix = get_em(args,val_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv,mode="all").cuda()
@@ -586,6 +621,15 @@ def main(args,vis):
         criterion = WARPLoss()
     else:
         assert False, "Unknown cost function"
+
+    if args.joint:
+        if args.rnn_cost == "MSE":
+            rnn_criterion = torch.nn.MSELoss()
+        elif args.rnn_cost == "COS":
+            coss_loss =torch.nn.CosineEmbeddingLoss() #margin can be added
+            rnn_criterion = lambda x,y:coss_loss(x,y,torch.ones((x.shape[0])))
+        else:
+            assert False, "Unknown rnn cost function"
     """
     optimizer = torch.optim.SGD(param_groups, lr=args.lr,
                                 momentum=args.momentum,
@@ -629,7 +673,7 @@ def main(args,vis):
             img_embeds, metas = d
             img_embeds = img_embeds.cuda()
             optimizer.zero_grad()
-            if args.joint and args.att in ["rnn","lstm","gru","affine","fc","lstm2"]:
+            if args.joint and args.att in ["rnn","lstm","gru","affine","fc","lstm2","fcb"]:
                 rnn_optimizer.zero_grad()
             comps = model(img_embeds)
             classes = metas["class"].cuda()
@@ -638,7 +682,7 @@ def main(args,vis):
             loss.update(loss_value.item(), img_embeds.size(0))
             optimizer.step()
 
-            if args.joint and args.att in ["rnn","lstm","gru","affine","fc","lstm2","random"]:
+            if args.joint and args.att in ["rnn","lstm","gru","affine","fc","lstm2","random","fcb"]:
                 rnn_optimizer.step()
                 train_embedding_matrix = get_em(args,train_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv,mode="train").cuda()
                 model.set_embedding(train_embedding_matrix)
@@ -654,61 +698,68 @@ def main(args,vis):
             bar.next()
         bar.finish()
         if args.joint and args.att in ["rnn","lstm","gru","affine","fc","lstm2"] and args.att!="random" :
+            train_rnn_tick(rnn_loader,args,model,rnn_optimizer,rnn_criterion,epoch)
             rnn_model.eval()
             val_embedding_matrix = get_em(args,val_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv, mode="val").cuda()
             all_embedding_matrix = get_em(args,val_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv,mode="all").cuda()
             unseen_embedding_matrix = get_em(args,val_loader,rnn_loader = rnn_loader, model=rnn_model,fv=fv,mode="unseen").cuda()
-        accpc = calc_perclass(perclass_accuracies,train_loader.dataset.train_sample_per_class)
+        accpc = calc_perclass(perclass_accuracies,train_loader.dataset.train_sample_per_class,"training")
         print("Train Accpc: %f" % accpc)
         
+            
         
         acc1_val,acc5_val, accpc_val, loss_val = test(val_loader,args,em=val_embedding_matrix, model=model, criterion=criterion)
-        
-        zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(args,eval_func,args.dset, all_embedding_matrix, unseen_embedding_matrix, model=model)
-        zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
-        print("Harmonic: %.6f" % zsl_harmonic)
-        print("------")
-        
-        ##### PLOTS
-        #Loss
-        draw_vis(vis=vis,title="Loss",name="train",epoch=epoch,value=loss.avg,legend=['train','val'])
-        draw_vis(vis=vis,title="Loss",name="val",epoch=epoch,value=loss_val,legend=['train','val'])
-        #acc1
-        draw_vis(vis=vis,title="Acc1",name="train",epoch=epoch,value=acc1.avg,legend=['train','val'])
-        draw_vis(vis=vis,title="Acc1",name="val",epoch=epoch,value=acc1_val,legend=['train','val'])
-        #acc5
-        draw_vis(vis=vis,title="Acc5",name="train",epoch=epoch,value=acc5.avg,legend=['train','val'])
-        draw_vis(vis=vis,title="Acc5",name="val",epoch=epoch,value=acc5_val,legend=['train','val'])
-        #accperclass
-        draw_vis(vis=vis,title="Accpc",name="train",epoch=epoch,value=accpc,legend=['train','val'])
-        draw_vis(vis=vis,title="Accpc",name="val",epoch=epoch,value=accpc_val,legend=['train','val'])
-        #testing
-        draw_vis(vis=vis,title="Testing",name="zsl_acc",epoch=epoch,value=zsl_acc,legend=['zsl_acc','seen','unseen','harmonic'])
-        draw_vis(vis=vis,title="Testing",name="seen",epoch=epoch,value=zsl_acc_seen,legend=['zsl_acc','seen','unseen','harmonic'])
-        draw_vis(vis=vis,title="Testing",name="unseen",epoch=epoch,value=zsl_acc_unseen,legend=['zsl_acc','seen','unseen','harmonic'])
-        draw_vis(vis=vis,title="Testing",name="harmonic",epoch=epoch,value=zsl_harmonic,legend=['zsl_acc','seen','unseen','harmonic'])
-        ##########
-
-        
-        if False and accpc_val > best_val_pc + best_val_pc/100 :
+        if vis is not None:
+            zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(args,eval_func,args.dset, all_embedding_matrix, unseen_embedding_matrix, model=model)
+            zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
+            print("Harmonic: %.6f" % zsl_harmonic)
+            print("------")      
+            ##### PLOTS
+            #Loss
+            draw_vis(vis=vis,title="Loss",name="train",epoch=epoch,value=loss.avg,legend=['train','val'])
+            draw_vis(vis=vis,title="Loss",name="val",epoch=epoch,value=loss_val,legend=['train','val'])
+            #acc1
+            draw_vis(vis=vis,title="Acc1",name="train",epoch=epoch,value=acc1.avg,legend=['train','val'])
+            draw_vis(vis=vis,title="Acc1",name="val",epoch=epoch,value=acc1_val,legend=['train','val'])
+            #acc5
+            draw_vis(vis=vis,title="Acc5",name="train",epoch=epoch,value=acc5.avg,legend=['train','val'])
+            draw_vis(vis=vis,title="Acc5",name="val",epoch=epoch,value=acc5_val,legend=['train','val'])
+            #accperclass
+            draw_vis(vis=vis,title="Accpc",name="train",epoch=epoch,value=accpc,legend=['train','val'])
+            draw_vis(vis=vis,title="Accpc",name="val",epoch=epoch,value=accpc_val,legend=['train','val'])
+            #testing
+            draw_vis(vis=vis,title="Testing",name="zsl_acc",epoch=epoch,value=zsl_acc,legend=['zsl_acc','seen','unseen','harmonic'])
+            draw_vis(vis=vis,title="Testing",name="seen",epoch=epoch,value=zsl_acc_seen,legend=['zsl_acc','seen','unseen','harmonic'])
+            draw_vis(vis=vis,title="Testing",name="unseen",epoch=epoch,value=zsl_acc_unseen,legend=['zsl_acc','seen','unseen','harmonic'])
+            draw_vis(vis=vis,title="Testing",name="harmonic",epoch=epoch,value=zsl_harmonic,legend=['zsl_acc','seen','unseen','harmonic'])
+            ##########
+        key =  str(args.joint)+"_"+args.att+"_"+args.cost
+        with open(key+"pclog.txt","w") as filem:
+                    filem.write(str(perclass_accs_global))
+        if  vis is None and accpc_val > best_val_pc + best_val_pc/100 :
             #zsl_acc, zsl_acc_seen, zsl_acc_unseen = evaluate(args,eval_func,args.dset, all_embedding_matrix, unseen_embedding_matrix, model=model)
             #zsl_harmonic = 2*( zsl_acc_seen * zsl_acc_unseen ) / ( zsl_acc_seen + zsl_acc_unseen )
             #print("Harmonic: %.6f" % zsl_harmonic)
-            best_val_pc = accpc_val
-            _, _, accpc_seen, _ = test(seen_loader,args,em=val_embedding_matrix, model=model, criterion=criterion,strm="Seen")
-            _, _, accpc_unseen, _ = test(unseen_loader,args,em=val_embedding_matrix, model=model, criterion=criterion, strm="Unseen")
-            test_harmonic = 2*( accpc_seen * accpc_unseen ) / ( accpc_seen + accpc_unseen )
-            print("Test Harmonic: %.6f" % test_harmonic)
-            print("------")
-            best_harmonic = test_harmonic
-            best_seen = accpc_seen
-            best_unseen = accpc_unseen
-            best_epoch = epoch
             with open("ale_results.pc","rb") as filem:
                 ale_results = pc.load(filem)
             key =  str(args.joint)+"_"+args.att+"_"+args.cost
+            
             if key not in ale_results or ale_results[key]["best_valpc"] + ale_results[key]["best_valpc"]/100 < accpc_val:
+                best_val_pc = accpc_val
+                _, _, accpc_seen, _ = test(seen_loader,args,em=val_embedding_matrix, model=model, criterion=criterion,strm="Seen")
+                _, _, accpc_unseen, _ = test(unseen_loader,args,em=val_embedding_matrix, model=model, criterion=criterion, strm="Unseen")
+                test_harmonic = 2*( accpc_seen * accpc_unseen ) / ( accpc_seen + accpc_unseen )
+                print("Test Harmonic: %.6f" % test_harmonic)
+                print("------")
+                best_harmonic = test_harmonic
+                best_seen = accpc_seen
+                best_unseen = accpc_unseen
+                best_epoch = epoch
                 print("FOUND NEW BEST: ",key)
+                with open("what_changed.txt","w") as filem:
+                    filem.write("Found new best: %s\n" % key)
+                with open(key+"pclog.txt","w") as filem:
+                    filem.write(str(perclass_accs_global))
                 ale_results[key] = {}
                 ale_results[key]["args"] = str(args)
                 ale_results[key]["best_valpc"] = accpc_val
@@ -726,7 +777,8 @@ def main(args,vis):
                     filem.write(str(args))
         print("------")
 
-    return best_val_pc, best_harmonic, best_seen, best_unseen, best_epoch
+    if vis is None:
+        return best_val_pc, best_harmonic, best_seen, best_unseen, best_epoch
 
 
 def log_results(log_string,args, is_rnn = False):
@@ -748,12 +800,16 @@ def randomize_params(args):
     args.wd = random.choice([5e-2,1e-2,5e-3,1e-3,5e-4,1e-4,5e-5,1e-5])
     args.rnn_wd = random.choice([5e-2,1e-2,5e-3,1e-3,5e-4,1e-4,5e-5,1e-5])
     args.joint_wd = random.choice([5e-2,1e-2,5e-3,1e-3,5e-4,1e-4,5e-5,1e-5])
-    args.batch_size = random.choice([16,64,256,1024]) 
-    args.rnn_batch_size = random.choice([4,16,64,256,1024]) 
+    args.batch_size = random.choice([64,256,1024]) 
+    args.rnn_batch_size = random.choice([64,256,1024]) 
     args.cost = random.choice(["ALE","CEL"])
     args.rnn_cost = random.choice(["MSE","COS"])
-    args.rnn_count = random.choice([10,20,50,100,200])
+    args.rnn_count = random.choice([10000,50000,100000])
+    args.rnn_count_word = random.choice([args.rnn_count*3//16, args.rnn_count*3//8,args.rnn_count*3//4])
+    args.curiculum = random.choice( ["mixed"]) #["mixed","curriculum"])
     args.kmeansk = random.choice([1,2,3,4])
+    #args.joint = random.choice([True,False])
+    #args.e2e = random.choice([True,False])
 
 
 def run_experiment(args,vis):
@@ -774,12 +830,12 @@ def run_experiment(args,vis):
         log_results(log_string,args)
 
 def run_experiments(args,vis):
-    possible = ["avg","rnn","lstm","lstm2","gru","affine","fc","fcb" ] #fisher
+    possible =  ["rnn","gru","lstm","lstm2","affine","fc","fcb" ] #fisher, avg, gru
     if args.rnn_only:
-        possible = ["rnn","lstm","lstm2","gru","affine","fc", "fcb"]
+        possible = ["rnn","gru","lstm","lstm2","affine","fc", "fcb"]
         #possible = ["fcb"]
     if args.joint:
-    	possible = ["rnn","lstm","lstm2","gru","affine","fc", "fcb" ] #fisher
+        possible = ["rnn","gru","lstm","lstm2","affine","fc", "fcb" ] #fisher
 
     random.shuffle(possible)
     while True :
@@ -818,11 +874,8 @@ if __name__ == '__main__':
     parser.add_argument('--kmeansk', type=int, default=3)
     parser.add_argument('--rnn-epochs', type=int, default=30)
     parser.add_argument('--rnn-count', type=int, default=50)
+    parser.add_argument('--rnn-count-word', type=int, default=50)
 
-    # misc
-    working_dir = osp.dirname(osp.abspath(__file__))
-
-    parser.add_argument('--model-dir', type=str, metavar='PATH', default='delete')
     parser.add_argument('--att', type=str, metavar='PATH', default='avg') #label,rnn, lstm, gru,avg,fisher,hocanın formülleri
     parser.add_argument('--mode',type=str, metavar='PATH',default="all")
     
@@ -832,41 +885,46 @@ if __name__ == '__main__':
     parser.add_argument('--joint', action='store_true')
     parser.add_argument('--crazy', action='store_true')
     parser.add_argument('--rnn-only', action='store_true')
+    parser.add_argument('--curriculum', type=str, metavar='PATH', default='mixed')
 
     parser.add_argument('--draw-best', action='store_true')
     try:
         args = parser.parse_args()
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-        args.model_dir = osp.join("./log",args.model_dir)
-        vis = visdom.Visdom(env=args.model_dir)
-        vis.check_connection()
         if args.crazy:
-            run_experiments(args,vis)
+            run_experiments(args,None)
         elif args.rnn_only:
-            _,_,loss,epoch = train_rnn(args,vis)
+            _,_,loss,epoch = train_rnn(args,None)
             
             log_string = "%s, loss: %f, epoch:%d" % (args.att,loss,epoch)
             print(log_string)
             log_results(log_string,args,True)
         elif args.draw_best:
-        	with open("ale_results.pc","rb") as filem:
+            with open("ale_results.pc","rb") as filem:
                 ale_results = pc.load(filem)
             for k in ale_results:
-            	argss = ale_results[k]["args"]
-            	key = str(argss.joint)+"_"+argss.att+"_"+argss.cost
-            	vis = visdom.Visdom(env=key)
-        		vis.check_connection()
-            	main(argss,vis)
+                argss = eval(ale_results[k]["args"])
+                key = str(argss.joint)+"-"+argss.att+"-"+argss.cost
+                vis = visdom.Visdom(env=key)
+                vis.check_connection()
+                argss.curriculum = args.curriculum
+                main(argss,vis)
             with open("rnn_results.pc","rb") as filem:
                 rnn_results = pc.load(filem)
             for k in rnn_results:
-            	argss = rnn_results[k]["args"]
-            	key = argss.att+"_"+argss.rnn_cost
-            	vis = visdom.Visdom(env=key)
-        		vis.check_connection()
-            	train_rnn(argss,vis)
+                if k == "foo":
+                    continue
+                argss = rnn_results[k]["args"]
+                key = argss.att+"-"+argss.rnn_cost
+                vis = visdom.Visdom(env=key)
+                vis.check_connection()
+                train_rnn(argss,vis)
 
         else:
+            key = str(args.joint)+"-"+args.att+"-"+args.cost
+            #assert False, "Take care"
+            vis = visdom.Visdom(env=key+"-deneme")
+            vis.check_connection()
             pc,h,s,u,epoch = main(args,vis)
             if args.att == "fisher":
                 log_string = "%s(%d) without joint: %f, %f, %f, %f at epoch %d" % (args.att,args.kmeansk,pc,s,u,h,epoch)
@@ -875,9 +933,7 @@ if __name__ == '__main__':
             print(log_string)
             log_results(log_string,args,False)
             
-        #vis.create_log(osp.join(args.model_dir,"visdom.log"))
     except KeyboardInterrupt:
         print("Saving and Exiting...")
-        #vis.create_log(osp.join(args.model_dir,"visdom.log"))
         exit()
 

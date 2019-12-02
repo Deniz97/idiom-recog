@@ -14,14 +14,44 @@ from random import shuffle
 #FIX pottedplant
 #FIX +s and _s to -s
 
+import io
+
+def load_vectors(fname):
+    fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
+    n, d = map(int, fin.readline().split())
+    data = {}
+    for line in fin:
+        tokens = line.rstrip().split(' ')
+        data[tokens[0]] = list(map(float, tokens[1:]))
+    return data
+
 class rnnData(data.Dataset):
-    def __init__(self,idioms=None, keys=None, words=None, counts=50):
-        self.idioms = idioms
-        self.keys = keys
-        self.words = words
-        self.max_len = 9
-        self.counts = counts
-        if idioms is None:
+    def __init__(self, keys=None, embeddings=None, args = None, is_train = False):
+        self.is_train = is_train
+        self.max_len = 7
+        self.curriculum = args.curriculum
+        self.epoch = 0
+        if args.curriculum == "curriculum":
+            assert False,"Curriculum learning not yet supported"
+        
+        if keys is None:
+            with open("/slow_data/denizulug/wiki_idiom_keys_sorted.pc","rb") as filem:
+                idioms = pc.load(filem)
+                idiom_keys = idioms[:int(args.rnn_count)]
+            with open("/slow_data/denizulug/wiki_word_keys_sorted.pc","rb") as filem:
+                words = pc.load(filem)
+                word_keys = words[:int(args.rnn_count_word)]
+            
+            self.valid_keys = idiom_keys[:len(idiom_keys)*5//20] 
+            idiom_keys = idiom_keys[len(idiom_keys)*5//20:]
+            self.keys = word_keys + idiom_keys
+            shuffle(self.keys)
+        else:
+            self.keys = keys
+
+            
+
+            """
             with open("/slow_data/denizulug/crawl_idioms"+str(counts)+"k","rb") as filem:
                 idioms = pc.load(filem)
                 self.idioms = idioms
@@ -29,17 +59,28 @@ class rnnData(data.Dataset):
                 shuffle(keys)
                 self.valid_keys = keys[:len(keys)*3//10]
                 self.keys = keys[len(keys)*3//10:]
-
-        if words is None:
-            with open("/slow_data/denizulug/crawl_words.pc","rb") as filem:
-                self.words = pc.load(filem)
+            """
+        if embeddings is None:
+            with open("/slow_data/denizulug/wiki_embeddings.pc","rb") as filem:
+                self.embeddings = pc.load(filem)
+        else:
+            self.embeddings = embeddings
 
         self.embed_size = self.get_embed_size()
     
     def get_embed_size(self):
-        return len(self.idioms[self.keys[0]])
+        return len(self.embeddings[self.keys[0]])
 
-    def get_all_embeddings(self,count=None):
+    def get_all_word_embeddings(self,count=None):
+        assert False,"Not yet implemented - get_word_embeddings"
+        """
+        if count is None:
+            count = self.counts
+        retval = torch.zeros((count))
+        for i,k in enumerate(self.words):
+            if not "-" in k:
+                retval[i] = self.words[k]
+
         retval = list(self.words.values())
         if count is None:
             count = self.counts*1000
@@ -49,34 +90,36 @@ class rnnData(data.Dataset):
             retval[i] = r / torch.norm(r,p=2)
 
         return retval
+        """
 
-    def get_word_embedding(self,word):
-        retval = torch.tensor(self.words[word])
+    def get_embedding(self,word):
+        retval = torch.tensor(self.embeddings[word])
+        if retval.shape[0] == 0:
+            print("WW4W: ",word)
         return retval/torch.norm( retval,p=2)
         #return torch.tensor(self.words[word])
     
-    def get_idiom_embedding(self,word):
-        retval = torch.tensor(self.idioms[word])
-        retval= retval / torch.norm(retval,p=2)
-        return retval
-        #return torch.tensor(self.idioms[word])
     def is_in(self, token):
-        return ( token in self.words) or (token in self.idioms)
+        return ( token in self.keys)
         
 
     def __getitem__(self, index):
-        
         key = self.keys[index]
 
-        target = self.get_idiom_embedding(key).float()
+        target = self.get_embedding(key).float()
         words = key.split("-")
 
         length = torch.tensor(len(words)).int()
         inp_seq = torch.zeros((self.max_len,self.embed_size))
         for i,w in enumerate(words):
-            inp_seq[i] = self.get_word_embedding(w)
+            inp_seq[i] = self.get_embedding(w)
+            if inp_seq[i].shape[0] == 0:
+                print("WWW ",words)
+        if target.shape[0] == 0:
+            print("2WWW ",words)
 
-
+        if len(words)==0 :
+            print("3WWWW: ",words)
         return inp_seq, target, key, length
 
     def __len__(self):
